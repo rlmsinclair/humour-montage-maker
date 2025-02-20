@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime
 import aiofiles
 import os
 from pathlib import Path
@@ -345,6 +346,12 @@ async def process_audio_chunk(
             status_code=500,
             content={"error": str(e)}
         )
+
+@app.post("/heartbeat")
+async def heartbeat():
+    """Endpoint to handle client heartbeat requests"""
+    logger.debug(f"Received heartbeat at {datetime.utcnow().isoformat()}")
+    return {"status": "alive", "timestamp": datetime.utcnow().isoformat()}
 
 if __name__ == "__main__":
     import uvicorn
