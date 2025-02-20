@@ -11,6 +11,10 @@ services:
       apt-get update
       apt-get install -y ffmpeg libavcodec-extra libavformat-dev libavutil-dev
       pip install -r requirements.txt
+      # Ensure ffmpeg persists to runtime
+      mkdir -p /workspace/.apt/usr/bin
+      cp /usr/bin/ffmpeg /workspace/.apt/usr/bin/
+      cp /usr/bin/ffprobe /workspace/.apt/usr/bin/
     run_command: uvicorn app:app --host 0.0.0.0 --port $PORT
     envs:
       - key: OPENAI_API_KEY

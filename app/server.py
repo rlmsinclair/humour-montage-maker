@@ -75,11 +75,13 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 class FFmpegHelper:
     FFMPEG_PATHS = [
+        '/workspace/.apt/usr/bin/ffmpeg',
         '/usr/bin/ffmpeg',
         '/usr/local/bin/ffmpeg'
     ]
     
     FFPROBE_PATHS = [
+        '/workspace/.apt/usr/bin/ffprobe',
         '/usr/bin/ffprobe',
         '/usr/local/bin/ffprobe'
     ]
