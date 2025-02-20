@@ -1,1 +1,5 @@
 ffmpeg
+ffprobe
+libavcodec-extra
+libavformat-dev
+libavutil-dev
