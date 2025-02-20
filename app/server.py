@@ -189,7 +189,7 @@ async def analyze_humor_segments(segments: List[Dict], batch_size: int = 5, cust
                         segment = batch[segment_num]
                         funny_clips = []
 
-                        for moment in segment_analysis.get('funny_moments', []):
+                        for moment in segment_analysis.get('moments', []):
                             try:
                                 words = moment.get('text', '').split()
                                 for i in range(len(segment.get('words', [])) - len(words) + 1):
@@ -216,11 +216,11 @@ async def analyze_humor_segments(segments: List[Dict], batch_size: int = 5, cust
 
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse JSON response: {e}")
-                    return [{**segment, 'humor_score': 0, 'funny_clips': []} for segment in batch]
+                    return [{**segment, 'humor_score': 0, 'funny_clips': []} for segment in batch]  # Keep funny_clips in output for backward compatibility
 
             except Exception as e:
                 logger.error(f"Error analyzing batch: {e}", exc_info=True)
-                return [{**segment, 'humor_score': 0, 'funny_clips': []} for segment in batch]
+                return [{**segment, 'humor_score': 0, 'funny_clips': []} for segment in batch]  # Keep funny_clips in output for backward compatibility
 
     # Process batches
     logger.info("Processing all batches")
