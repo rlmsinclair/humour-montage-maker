@@ -55,11 +55,37 @@ class FFmpegHelper:
     @staticmethod
     async def get_duration(file_path: Path) -> float | None:
         try:
+            # First, verify the file exists and get format info
+            format_cmd = [
+                'ffprobe', '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                str(file_path)
+            ]
+            process = await asyncio.create_subprocess_exec(
+                *format_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            if stderr:
+                logger.error(f"FFprobe format error: {stderr.decode()}")
+                return None
+                
+            if stdout:
+                try:
+                    format_info = json.loads(stdout.decode())
+                    if 'format' in format_info:
+                        logger.info(f"Detected format: {format_info['format'].get('format_name', 'unknown')}")
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse FFprobe format info")
+            
+            # Then get duration with more verbose error logging
             cmd = [
-                'ffprobe', '-v', 'error',
+                'ffprobe', '-v', 'warning',
                 '-show_entries', 'format=duration',
                 '-of', 'default=noprint_wrappers=1:nokey=1',
-                str(file_path)
+                '-i', str(file_path)
             ]
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -67,10 +93,19 @@ class FFmpegHelper:
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await process.communicate()
+            
+            if stderr:
+                logger.error(f"FFprobe duration error: {stderr.decode()}")
+            
             if process.returncode == 0 and stdout:
-                return float(stdout.decode().strip())
-        except Exception:
-            pass
+                duration = float(stdout.decode().strip())
+                logger.info(f"Successfully determined duration: {duration} seconds")
+                return duration
+            else:
+                logger.error(f"FFprobe failed with return code: {process.returncode}")
+                
+        except Exception as e:
+            logger.error(f"Error getting duration: {str(e)}", exc_info=True)
         return None
 
 async def split_audio_into_chunks(audio_path: Path) -> List[Path]:
@@ -388,27 +423,65 @@ async def process_audio(file: UploadFile = File(...)):
                 continue
         logger.info(f"Found {len(funny_clips)} funny clips")
 
-        # Cleanup
-        logger.info("Cleaning up temporary files")
-        try:
-            os.remove(file_path)
-            for chunk in chunks:
-                try:
-                    os.remove(chunk)
-                except Exception as e:
-                    logger.warning(f"Failed to remove chunk file: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to cleanup files: {e}")
+        # Prepare response
+        response = {"clips": funny_clips}
+        logger.info("Processing complete, preparing to send response")
 
-        logger.info("Processing complete, returning results")
-        return {"clips": funny_clips}
+        # Send response first
+        await asyncio.create_task(cleanup_files(file_path, chunks))
+        return response
 
     except Exception as e:
         logger.error(f"Error processing audio: {e}", exc_info=True)
+        # Ensure cleanup happens even on error
+        if 'file_path' in locals() and 'chunks' in locals():
+            await asyncio.create_task(cleanup_files(file_path, chunks))
         return JSONResponse(
             status_code=500,
             content={"error": str(e)}
         )
+
+async def cleanup_files(file_path: Path, chunks: List[Path]):
+    """Cleanup all temporary files after response is sent."""
+    try:
+        logger.info("Starting post-response cleanup")
+        
+        # Clean up uploaded file
+        if file_path.exists():
+            os.remove(file_path)
+            logger.debug(f"Removed uploaded file: {file_path}")
+
+        # Clean up chunk files
+        for chunk in chunks:
+            try:
+                if chunk.exists():
+                    os.remove(chunk)
+                    logger.debug(f"Removed chunk file: {chunk}")
+            except Exception as e:
+                logger.warning(f"Failed to remove chunk file {chunk}: {e}")
+
+        # Clean up cache files
+        cache_dir = Path("cache")
+        if cache_dir.exists():
+            for cache_file in cache_dir.glob("*.json"):
+                try:
+                    os.remove(cache_file)
+                    logger.debug(f"Removed cache file: {cache_file}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove cache file {cache_file}: {e}")
+
+        # Clean up empty directories
+        for dir_path in [UPLOAD_DIR, Path("temp_audio_chunks"), cache_dir]:
+            try:
+                if dir_path.exists() and not any(dir_path.iterdir()):
+                    dir_path.rmdir()
+                    logger.debug(f"Removed empty directory: {dir_path}")
+            except Exception as e:
+                logger.warning(f"Failed to remove directory {dir_path}: {e}")
+
+        logger.info("Post-response cleanup completed")
+    except Exception as e:
+        logger.error(f"Error during post-response cleanup: {e}", exc_info=True)
 
 if __name__ == "__main__":
     import uvicorn
