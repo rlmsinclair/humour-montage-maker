@@ -39,9 +39,39 @@ UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 class FFmpegHelper:
+    FFMPEG_PATHS = [
+        '/usr/bin/ffmpeg',
+        '/usr/local/bin/ffmpeg',
+        '/app/vendor/ffmpeg/ffmpeg',
+        '/app/.heroku/vendor/ffmpeg/ffmpeg'
+    ]
+    
+    FFPROBE_PATHS = [
+        '/usr/bin/ffprobe',
+        '/usr/local/bin/ffprobe',
+        '/app/vendor/ffmpeg/ffprobe',
+        '/app/.heroku/vendor/ffmpeg/ffprobe'
+    ]
+
+    @staticmethod
+    def find_executable(paths: List[str]) -> str:
+        """Find the first existing executable from a list of paths."""
+        for path in paths:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                logger.info(f"Found executable at: {path}")
+                return path
+        return paths[0]  # Return first path as fallback
+
     @staticmethod
     async def run_command(cmd: List[str]) -> tuple[bool, str]:
         try:
+            # Replace ffmpeg/ffprobe with full paths if needed
+            if cmd[0] == 'ffmpeg':
+                cmd[0] = FFmpegHelper.find_executable(FFmpegHelper.FFMPEG_PATHS)
+            elif cmd[0] == 'ffprobe':
+                cmd[0] = FFmpegHelper.find_executable(FFmpegHelper.FFPROBE_PATHS)
+
+            logger.debug(f"Executing command: {' '.join(cmd)}")
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -50,14 +80,18 @@ class FFmpegHelper:
             stdout, stderr = await process.communicate()
             return process.returncode == 0, stderr.decode()
         except Exception as e:
+            logger.error(f"Command execution error: {str(e)}")
             return False, str(e)
 
     @staticmethod
     async def get_duration(file_path: Path) -> float | None:
         try:
+            ffprobe_path = FFmpegHelper.find_executable(FFmpegHelper.FFPROBE_PATHS)
+            logger.info(f"Using ffprobe from: {ffprobe_path}")
+
             # First, verify the file exists and get format info
             format_cmd = [
-                'ffprobe', '-v', 'quiet',
+                ffprobe_path, '-v', 'quiet',
                 '-print_format', 'json',
                 '-show_format',
                 str(file_path)
