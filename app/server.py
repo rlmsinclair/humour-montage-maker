@@ -369,6 +369,14 @@ def group_words_into_segments(words: List[Dict], segment_duration: int = 120, ov
 @app.post("/process-audio")
 async def process_audio(file: UploadFile = File(...)):
     try:
+        # Validate file format
+        if not file.filename.lower().endswith(('.mp3', '.wav', '.m4a', '.aac')):
+            logger.error(f"Unsupported file format: {file.filename}")
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Unsupported file format. Please upload an MP3, WAV, M4A, or AAC file."}
+            )
+            
         logger.info(f"Received audio file: {file.filename}")
         
         # Save uploaded file
