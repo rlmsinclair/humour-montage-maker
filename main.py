@@ -44,24 +44,57 @@ class ProcessingThread(QThread):
                 self.processing_finished.emit(False, "Error extracting audio!")
                 return
 
-            # Send audio to API for processing
-            self.status_update.emit("Processing audio...")
+            # Get audio duration
+            self.status_update.emit("Getting audio duration...")
+            duration = await self.get_audio_duration(audio_path)
+            if duration is None:
+                self.processing_finished.emit(False, "Could not determine audio duration!")
+                return
+
+            # Process audio in chunks
+            self.status_update.emit("Processing audio in chunks...")
+            chunk_duration = 60  # 60 seconds per chunk
+            funny_clips = []
+            
             async with aiohttp.ClientSession() as session:
-                data = aiohttp.FormData()
-                data.add_field('file',
-                    open(audio_path, 'rb'),
-                    filename=audio_path.name,
-                    content_type='audio/mpeg'
-                )
-                
-                async with session.post(f"{API_URL}/process-audio", data=data) as response:
-                    if response.status != 200:
-                        error_msg = await response.text()
-                        self.processing_finished.emit(False, f"API Error: {error_msg}")
-                        return
+                for start_time in range(0, int(duration), chunk_duration):
+                    if not self.running:
+                        break
                         
-                    result = await response.json()
-                    funny_clips = result.get('clips', [])
+                    # Create chunk
+                    chunk_path = Path(f'temp_chunk_{start_time}.mp3')
+                    success = await self.create_audio_chunk(audio_path, start_time, chunk_duration, chunk_path)
+                    if not success:
+                        continue
+
+                    try:
+                        # Send chunk to API
+                        self.status_update.emit(f"Processing chunk starting at {start_time}s...")
+                        data = aiohttp.FormData()
+                        data.add_field('file',
+                            open(chunk_path, 'rb'),
+                            filename=chunk_path.name,
+                            content_type='audio/mpeg'
+                        )
+                        data.add_field('chunk_start', str(start_time))
+                        data.add_field('chunk_duration', str(chunk_duration))
+                        
+                        async with session.post(f"{API_URL}/process-audio-chunk", data=data) as response:
+                            if response.status != 200:
+                                error_msg = await response.text()
+                                self.status_update.emit(f"Error processing chunk: {error_msg}")
+                                continue
+                                
+                            result = await response.json()
+                            chunk_clips = result.get('clips', [])
+                            funny_clips.extend(chunk_clips)
+                            
+                            progress = min(100, int((start_time + chunk_duration) / duration * 100))
+                            self.progress_update.emit("Processing audio", progress)
+                    finally:
+                        # Clean up chunk file
+                        if chunk_path.exists():
+                            os.remove(chunk_path)
 
             if funny_clips:
                 merged_clips = self.merge_overlapping_clips(funny_clips)
@@ -123,6 +156,65 @@ class ProcessingThread(QThread):
 
         # Default to just 'ffmpeg' and let the system handle it
         return 'ffmpeg'
+
+    async def get_audio_duration(self, audio_path: Path) -> Optional[float]:
+        try:
+            ffmpeg_path = self.get_ffmpeg_path()
+            cmd = [
+                ffmpeg_path, '-i', str(audio_path),
+                '-show_entries', 'format=duration',
+                '-v', 'quiet',
+                '-of', 'csv=p=0'
+            ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0 and stdout:
+                duration = float(stdout.decode().strip())
+                self.status_update.emit(f"Audio duration: {duration} seconds")
+                return duration
+            else:
+                self.status_update.emit("Failed to get audio duration")
+                return None
+                
+        except Exception as e:
+            self.status_update.emit(f"Error getting audio duration: {e}")
+            return None
+
+    async def create_audio_chunk(self, audio_path: Path, start_time: int, chunk_duration: int, output_path: Path) -> bool:
+        try:
+            ffmpeg_path = self.get_ffmpeg_path()
+            cmd = [
+                ffmpeg_path, '-i', str(audio_path),
+                '-ss', str(start_time),
+                '-t', str(chunk_duration),
+                '-acodec', 'libmp3lame',
+                '-ac', '1', '-ar', '16000',
+                '-y', str(output_path)
+            ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0 and output_path.exists():
+                self.status_update.emit(f"Successfully created chunk at {start_time}s")
+                return True
+            else:
+                self.status_update.emit(f"Failed to create chunk at {start_time}s")
+                return False
+                
+        except Exception as e:
+            self.status_update.emit(f"Error creating audio chunk: {e}")
+            return False
 
     async def extract_audio(self, video_path: Path) -> Optional[Path]:
         try:

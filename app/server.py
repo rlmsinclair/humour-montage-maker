@@ -31,203 +31,10 @@ gemini_client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 
 app = FastAPI()
 
-@app.on_event("startup")
-async def startup_event():
-    """Verify ffmpeg is available at startup"""
-    try:
-        # Check ffmpeg
-        ffmpeg_path = FFmpegHelper.find_executable(FFmpegHelper.FFMPEG_PATHS)
-        process = await asyncio.create_subprocess_exec(
-            ffmpeg_path, '-version',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-        if process.returncode == 0:
-            logger.info(f"ffmpeg found at {ffmpeg_path}")
-            logger.info(f"ffmpeg version: {stdout.decode().splitlines()[0]}")
-        else:
-            logger.error(f"ffmpeg check failed: {stderr.decode()}")
-            
-        # Check ffprobe
-        ffprobe_path = FFmpegHelper.find_executable(FFmpegHelper.FFPROBE_PATHS)
-        process = await asyncio.create_subprocess_exec(
-            ffprobe_path, '-version',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-        if process.returncode == 0:
-            logger.info(f"ffprobe found at {ffprobe_path}")
-            logger.info(f"ffprobe version: {stdout.decode().splitlines()[0]}")
-        else:
-            logger.error(f"ffprobe check failed: {stderr.decode()}")
-            
-    except Exception as e:
-        logger.error(f"Error checking ffmpeg/ffprobe: {str(e)}")
-
 # Settings
-CHUNK_DURATION = 60  # Duration in seconds per chunk
-MAX_CONCURRENT_CHUNKS = 4
 MAX_RETRIES = 3
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
-
-class FFmpegHelper:
-    FFMPEG_PATHS = [
-        '/workspace/.apt/usr/bin/ffmpeg',
-        '/usr/bin/ffmpeg',
-        '/usr/local/bin/ffmpeg'
-    ]
-    
-    FFPROBE_PATHS = [
-        '/workspace/.apt/usr/bin/ffprobe',
-        '/usr/bin/ffprobe',
-        '/usr/local/bin/ffprobe'
-    ]
-
-    @staticmethod
-    def find_executable(paths: List[str]) -> str:
-        """Find the first existing executable from a list of paths."""
-        for path in paths:
-            if os.path.isfile(path) and os.access(path, os.X_OK):
-                logger.info(f"Found executable at: {path}")
-                return path
-        return paths[0]  # Return first path as fallback
-
-    @staticmethod
-    async def run_command(cmd: List[str]) -> tuple[bool, str]:
-        try:
-            # Replace ffmpeg/ffprobe with full paths if needed
-            if cmd[0] == 'ffmpeg':
-                cmd[0] = FFmpegHelper.find_executable(FFmpegHelper.FFMPEG_PATHS)
-            elif cmd[0] == 'ffprobe':
-                cmd[0] = FFmpegHelper.find_executable(FFmpegHelper.FFPROBE_PATHS)
-
-            logger.debug(f"Executing command: {' '.join(cmd)}")
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-            return process.returncode == 0, stderr.decode()
-        except Exception as e:
-            logger.error(f"Command execution error: {str(e)}")
-            return False, str(e)
-
-    @staticmethod
-    async def get_duration(file_path: Path) -> float | None:
-        try:
-            ffprobe_path = FFmpegHelper.find_executable(FFmpegHelper.FFPROBE_PATHS)
-            logger.info(f"Using ffprobe from: {ffprobe_path}")
-
-            # First, verify the file exists and get format info
-            format_cmd = [
-                ffprobe_path, '-v', 'quiet',
-                '-print_format', 'json',
-                '-show_format',
-                str(file_path)
-            ]
-            process = await asyncio.create_subprocess_exec(
-                *format_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-            if stderr:
-                logger.error(f"FFprobe format error: {stderr.decode()}")
-                return None
-                
-            if stdout:
-                try:
-                    format_info = json.loads(stdout.decode())
-                    if 'format' in format_info:
-                        logger.info(f"Detected format: {format_info['format'].get('format_name', 'unknown')}")
-                except json.JSONDecodeError:
-                    logger.error("Failed to parse FFprobe format info")
-            
-            # Then get duration with more verbose error logging
-            cmd = [
-                ffprobe_path, '-v', 'warning',
-                '-show_entries', 'format=duration',
-                '-of', 'default=noprint_wrappers=1:nokey=1',
-                '-i', str(file_path)
-            ]
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-            
-            if stderr:
-                logger.error(f"FFprobe duration error: {stderr.decode()}")
-            
-            if process.returncode == 0 and stdout:
-                duration = float(stdout.decode().strip())
-                logger.info(f"Successfully determined duration: {duration} seconds")
-                return duration
-            else:
-                logger.error(f"FFprobe failed with return code: {process.returncode}")
-                
-        except Exception as e:
-            logger.error(f"Error getting duration: {str(e)}", exc_info=True)
-        return None
-
-async def split_audio_into_chunks(audio_path: Path) -> List[Path]:
-    logger.info(f"Starting to split audio file: {audio_path}")
-    chunks_dir = Path('temp_audio_chunks')
-    chunks_dir.mkdir(exist_ok=True)
-
-    try:
-        duration = await FFmpegHelper.get_duration(audio_path)
-        if not duration:
-            logger.error("Could not determine audio duration")
-            return []
-        logger.info(f"Audio duration: {duration} seconds")
-
-        chunk_paths = []
-        semaphore = asyncio.Semaphore(4)
-
-        async def create_chunk(start_time: int) -> Path | None:
-            async with semaphore:
-                chunk_path = chunks_dir / f'chunk_{start_time}.mp3'
-                logger.debug(f"Creating chunk at {start_time}s -> {chunk_path}")
-
-                ffmpeg_path = FFmpegHelper.find_executable(FFmpegHelper.FFMPEG_PATHS)
-                logger.info(f"Using ffmpeg from: {ffmpeg_path}")
-                
-                cmd = [
-                    ffmpeg_path, '-i', str(audio_path),
-                    '-ss', str(start_time),
-                    '-t', str(CHUNK_DURATION),
-                    '-acodec', 'libmp3lame',
-                    '-ac', '1', '-ar', '16000',
-                    '-y', str(chunk_path)
-                ]
-
-                success, error = await FFmpegHelper.run_command(cmd)
-                if success and chunk_path.exists():
-                    logger.debug(f"Successfully created chunk at {start_time}s")
-                    return chunk_path
-                else:
-                    logger.warning(f"Failed to create chunk at {start_time}s: {error}")
-                    return None
-
-        tasks = []
-        for start_time in range(0, int(duration), CHUNK_DURATION):
-            tasks.append(create_chunk(start_time))
-        logger.info(f"Created {len(tasks)} chunk tasks")
-
-        results = await asyncio.gather(*tasks)
-        chunk_paths = [path for path in results if path is not None]
-        logger.info(f"Successfully created {len(chunk_paths)} chunks")
-
-        return sorted(chunk_paths)
-    except Exception as e:
-        logger.error(f"Error splitting audio into chunks: {e}", exc_info=True)
-        return []
 
 async def transcribe_chunk(chunk_path: Path, offset: float = 0) -> List[Dict]:
     if not chunk_path.exists():
@@ -436,8 +243,14 @@ def group_words_into_segments(words: List[Dict], segment_duration: int = 120, ov
 
     return segments
 
-@app.post("/process-audio")
-async def process_audio(file: UploadFile = File(...)):
+from fastapi import Form
+
+@app.post("/process-audio-chunk")
+async def process_audio_chunk(
+    file: UploadFile = File(...),
+    chunk_start: float = Form(...),
+    chunk_duration: float = Form(...)
+):
     try:
         # Validate file format
         if not file.filename.lower().endswith(('.mp3', '.wav', '.m4a', '.aac')):
@@ -447,119 +260,63 @@ async def process_audio(file: UploadFile = File(...)):
                 content={"error": "Unsupported file format. Please upload an MP3, WAV, M4A, or AAC file."}
             )
             
-        logger.info(f"Received audio file: {file.filename}")
+        logger.info(f"Received audio chunk starting at {chunk_start}s with duration {chunk_duration}s")
         
-        # Save uploaded file
-        file_path = UPLOAD_DIR / file.filename
-        async with aiofiles.open(file_path, 'wb') as f:
+        # Save chunk file
+        chunk_path = UPLOAD_DIR / f"chunk_{chunk_start}.mp3"
+        async with aiofiles.open(chunk_path, 'wb') as f:
             content = await file.read()
             await f.write(content)
-        logger.info(f"Saved file to {file_path}")
+        logger.info(f"Saved chunk to {chunk_path}")
 
-        # Split audio into chunks
-        logger.info("Starting audio chunking process")
-        chunks = await split_audio_into_chunks(file_path)
-        if not chunks:
-            logger.error("Failed to split audio into chunks")
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Failed to split audio into chunks"}
-            )
-        logger.info(f"Successfully split audio into {len(chunks)} chunks")
-
-        # Transcribe chunks
+        # Transcribe chunk
         logger.info("Starting transcription process")
-        all_words = []
-        for i, chunk in enumerate(chunks):
-            logger.info(f"Transcribing chunk {i+1}/{len(chunks)}")
-            start_time = float(chunk.stem.split('_')[1])
-            words = await transcribe_chunk(chunk, start_time)
-            all_words.extend(words)
-        logger.info(f"Transcription complete, got {len(all_words)} words")
+        words = await transcribe_chunk(chunk_path, chunk_start)
+        logger.info(f"Transcription complete, got {len(words)} words")
 
-        # Group words into segments
-        logger.info("Grouping words into segments")
-        segments = group_words_into_segments(sorted(all_words, key=lambda x: x['start']))
-        logger.info(f"Created {len(segments)} segments")
+        # Group words into a segment
+        segment = {
+            'start_time': chunk_start,
+            'end_time': chunk_start + chunk_duration,
+            'words': words,
+            'text': ' '.join(w['text'] for w in words)
+        }
+
+        # Analyze humor for this segment
+        analyzed_segments = await analyze_humor_segments([segment])
         
-        # Analyze humor
-        logger.info("Starting humor analysis")
-        analyzed_segments = await analyze_humor_segments(segments)
-        logger.info(f"Completed humor analysis for {len(analyzed_segments)} segments")
-
-        # Extract funny clips
-        logger.info("Extracting funny clips")
+        # Extract funny clips from this segment
         funny_clips = []
-        for segment in analyzed_segments:
-            try:
-                humor_score = segment.get('humor_score', 0)
-                clips = segment.get('funny_clips', [])
-                if humor_score >= 40:
-                    funny_clips.extend(clips)
-            except Exception as e:
-                logger.error(f"Error processing segment: {e}")
-                continue
-        logger.info(f"Found {len(funny_clips)} funny clips")
+        if analyzed_segments:
+            segment = analyzed_segments[0]
+            humor_score = segment.get('humor_score', 0)
+            if humor_score >= 40:
+                funny_clips.extend(segment.get('funny_clips', []))
 
-        # Prepare response
-        response = {"clips": funny_clips}
-        logger.info("Processing complete, preparing to send response")
+        # Cleanup chunk file
+        if chunk_path.exists():
+            os.remove(chunk_path)
+            logger.debug(f"Removed chunk file: {chunk_path}")
 
-        # Send response first
-        await asyncio.create_task(cleanup_files(file_path, chunks))
-        return response
+        return {
+            "chunk_start": chunk_start,
+            "chunk_duration": chunk_duration,
+            "clips": funny_clips
+        }
 
     except Exception as e:
-        logger.error(f"Error processing audio: {e}", exc_info=True)
-        # Ensure cleanup happens even on error
-        if 'file_path' in locals() and 'chunks' in locals():
-            await asyncio.create_task(cleanup_files(file_path, chunks))
+        logger.error(f"Error processing audio chunk: {e}", exc_info=True)
+        # Clean up chunk file if it exists
+        if 'chunk_path' in locals() and chunk_path.exists():
+            try:
+                os.remove(chunk_path)
+                logger.debug(f"Cleaned up chunk file after error: {chunk_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to clean up chunk file: {cleanup_error}")
         return JSONResponse(
             status_code=500,
             content={"error": str(e)}
         )
-
-async def cleanup_files(file_path: Path, chunks: List[Path]):
-    """Cleanup all temporary files after response is sent."""
-    try:
-        logger.info("Starting post-response cleanup")
-        
-        # Clean up uploaded file
-        if file_path.exists():
-            os.remove(file_path)
-            logger.debug(f"Removed uploaded file: {file_path}")
-
-        # Clean up chunk files
-        for chunk in chunks:
-            try:
-                if chunk.exists():
-                    os.remove(chunk)
-                    logger.debug(f"Removed chunk file: {chunk}")
-            except Exception as e:
-                logger.warning(f"Failed to remove chunk file {chunk}: {e}")
-
-        # Clean up cache files
-        cache_dir = Path("cache")
-        if cache_dir.exists():
-            for cache_file in cache_dir.glob("*.json"):
-                try:
-                    os.remove(cache_file)
-                    logger.debug(f"Removed cache file: {cache_file}")
-                except Exception as e:
-                    logger.warning(f"Failed to remove cache file {cache_file}: {e}")
-
-        # Clean up empty directories
-        for dir_path in [UPLOAD_DIR, Path("temp_audio_chunks"), cache_dir]:
-            try:
-                if dir_path.exists() and not any(dir_path.iterdir()):
-                    dir_path.rmdir()
-                    logger.debug(f"Removed empty directory: {dir_path}")
-            except Exception as e:
-                logger.warning(f"Failed to remove directory {dir_path}: {e}")
-
-        logger.info("Post-response cleanup completed")
-    except Exception as e:
-        logger.error(f"Error during post-response cleanup: {e}", exc_info=True)
 
 if __name__ == "__main__":
     import uvicorn
