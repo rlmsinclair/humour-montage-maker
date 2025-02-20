@@ -116,7 +116,7 @@ class FFmpegHelper:
             
             # Then get duration with more verbose error logging
             cmd = [
-                'ffprobe', '-v', 'warning',
+                ffprobe_path, '-v', 'warning',
                 '-show_entries', 'format=duration',
                 '-of', 'default=noprint_wrappers=1:nokey=1',
                 '-i', str(file_path)
@@ -162,8 +162,11 @@ async def split_audio_into_chunks(audio_path: Path) -> List[Path]:
                 chunk_path = chunks_dir / f'chunk_{start_time}.mp3'
                 logger.debug(f"Creating chunk at {start_time}s -> {chunk_path}")
 
+                ffmpeg_path = FFmpegHelper.find_executable(FFmpegHelper.FFMPEG_PATHS)
+                logger.info(f"Using ffmpeg from: {ffmpeg_path}")
+                
                 cmd = [
-                    'ffmpeg', '-i', str(audio_path),
+                    ffmpeg_path, '-i', str(audio_path),
                     '-ss', str(start_time),
                     '-t', str(CHUNK_DURATION),
                     '-acodec', 'libmp3lame',
