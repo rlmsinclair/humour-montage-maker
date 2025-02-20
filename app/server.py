@@ -42,7 +42,7 @@ Return your analysis as a JSON object with this exact format:
         {{
             "segment_number": <number of the segment>,
             "score": <number 0-100 indicating how funny the text is overall>,
-            "funny_moments": [
+            "moments": [
                 {{
                     "text": "<Lengthy, exact word-for-word quote of the funny part>",
                     "reason": "<brief explanation of why this moment is humorous>"
@@ -60,7 +60,7 @@ Consider elements like:
 - Irony or sarcasm
 - Comedic timing in dialogue
 
-Only include genuinely funny moments. If nothing is funny, return an empty funny_moments array.
+Only include genuinely funny moments. If nothing is funny, return an empty moments array.
 Ensure the "text" field matches words exactly as they appear in the original text."""
 
 # Settings
@@ -309,7 +309,7 @@ async def process_audio_chunk(
             segment = analyzed_segments[0]
             humor_score = segment.get('humor_score', 0)
             if humor_score >= 40:
-                funny_clips.extend(segment.get('funny_clips', []))
+                funny_clips.extend(segment.get('funny_clips', []))  # Keep using funny_clips in API response for backward compatibility
 
         # Cleanup chunk file
         if chunk_path.exists():
