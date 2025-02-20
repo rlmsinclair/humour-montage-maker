@@ -160,12 +160,16 @@ class ProcessingThread(QThread):
     async def get_audio_duration(self, audio_path: Path) -> Optional[float]:
         try:
             ffmpeg_path = self.get_ffmpeg_path()
+            # Use ffprobe to get duration
             cmd = [
-                ffmpeg_path, '-i', str(audio_path),
+                ffmpeg_path.replace('ffmpeg', 'ffprobe'),
+                '-v', 'error',
                 '-show_entries', 'format=duration',
-                '-v', 'quiet',
-                '-of', 'csv=p=0'
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(audio_path)
             ]
+            
+            self.status_update.emit(f"Getting duration using command: {' '.join(cmd)}")
             
             process = await asyncio.create_subprocess_exec(
                 *cmd,

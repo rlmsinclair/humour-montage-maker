@@ -31,6 +31,38 @@ gemini_client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 
 app = FastAPI()
 
+# Default prompt template
+DEFAULT_PROMPT = """You are a humor analysis system. Analyze these segments of a transcribed video which may have multiple speakers for humorous content and rate them:
+
+{segments_text}
+
+Return your analysis as a JSON object with this exact format:
+{{
+    "segments": [
+        {{
+            "segment_number": <number of the segment>,
+            "score": <number 0-100 indicating how funny the text is overall>,
+            "funny_moments": [
+                {{
+                    "text": "<Lengthy, exact word-for-word quote of the funny part>",
+                    "reason": "<brief explanation of why this moment is humorous>"
+                }}
+            ]
+        }}
+    ]
+}}
+
+Consider elements like:
+- Unexpected twists or surprises
+- Clever wordplay or puns
+- Amusing situations or scenarios
+- Funny reactions or responses
+- Irony or sarcasm
+- Comedic timing in dialogue
+
+Only include genuinely funny moments. If nothing is funny, return an empty funny_moments array.
+Ensure the "text" field matches words exactly as they appear in the original text."""
+
 # Settings
 MAX_RETRIES = 3
 UPLOAD_DIR = Path("uploads")
@@ -98,7 +130,7 @@ async def transcribe_chunk(chunk_path: Path, offset: float = 0) -> List[Dict]:
                 return []
     return []
 
-async def analyze_humor_segments(segments: List[Dict], batch_size: int = 5) -> List[Dict]:
+async def analyze_humor_segments(segments: List[Dict], batch_size: int = 5, custom_prompt: str = None) -> List[Dict]:
     logger.info(f"Starting humor analysis for {len(segments)} segments with batch size {batch_size}")
     results = []
     semaphore = asyncio.Semaphore(2)
@@ -114,36 +146,8 @@ async def analyze_humor_segments(segments: List[Dict], batch_size: int = 5) -> L
                 segments_text = "\n---\n".join(
                     [f"Segment {i + 1}: {s['text']}" for i, s in enumerate(batch)])
 
-                prompt = f"""You are a humor analysis system. Analyze these segments of a transcribed video which may have multiple speakers for humorous content and rate them:
-
-{segments_text}
-
-Return your analysis as a JSON object with this exact format:
-{{
-    "segments": [
-        {{
-            "segment_number": <number of the segment>,
-            "score": <number 0-100 indicating how funny the text is overall>,
-            "funny_moments": [
-                {{
-                    "text": "<Lengthy, exact word-for-word quote of the funny part>",
-                    "reason": "<brief explanation of why this moment is humorous>"
-                }}
-            ]
-        }}
-    ]
-}}
-
-Consider elements like:
-- Unexpected twists or surprises
-- Clever wordplay or puns
-- Amusing situations or scenarios
-- Funny reactions or responses
-- Irony or sarcasm
-- Comedic timing in dialogue
-
-Only include genuinely funny moments. If nothing is funny, return an empty funny_moments array.
-Ensure the "text" field matches words exactly as they appear in the original text."""
+                # Use custom prompt if provided, otherwise use default
+                prompt = custom_prompt.format(segments_text=segments_text) if custom_prompt else DEFAULT_PROMPT.format(segments_text=segments_text)
 
                 logger.debug("Sending request to Gemini API")
                 response = await asyncio.to_thread(
@@ -249,7 +253,8 @@ from fastapi import Form
 async def process_audio_chunk(
     file: UploadFile = File(...),
     chunk_start: float = Form(...),
-    chunk_duration: float = Form(...)
+    chunk_duration: float = Form(...),
+    custom_prompt: str = Form(None)  # Optional custom prompt parameter
 ):
     try:
         # Validate file format
@@ -283,7 +288,7 @@ async def process_audio_chunk(
         }
 
         # Analyze humor for this segment
-        analyzed_segments = await analyze_humor_segments([segment])
+        analyzed_segments = await analyze_humor_segments([segment], custom_prompt=custom_prompt)
         
         # Extract funny clips from this segment
         funny_clips = []
