@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QMessageBox, QSlider, QFrame, QGraphicsScene, QGraphicsView,
                             QGraphicsProxyWidget)
 from PyQt6.QtGui import QPainter, QBrush, QLinearGradient, QColor
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QUrl, QTime, QTimer
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QUrl, QTime, QTimer, QRectF, QRect
 from PyQt6.QtGui import QColor, QPalette, QIcon
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
@@ -393,12 +393,13 @@ class MainWindow(QMainWindow):
         self.overlay_proxy.setZValue(1)  # Ensure overlay is on top
         self.scene.addItem(self.overlay_proxy)
         self.overlay_frame.installEventFilter(self)
-        self.overlay_frame.setGeometry(0, 0, self.video_widget.width(), self.video_widget.height())
+        self.overlay_frame.setGeometry(QRect(0, 0, self.video_widget.width(), self.video_widget.height()))
         self.overlay_frame.raise_()  # Ensure overlay is on top
         self.overlay_frame.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         # Make overlay frame resize with video widget
         def handle_resize(event):
-            self.overlay_frame.setGeometry(0, 0, event.size().width(), event.size().height())
+            rect = QRect(0, 0, event.size().width(), event.size().height())
+            self.overlay_frame.setGeometry(rect)
             self.overlay_frame.raise_()
             event.accept()
         self.video_widget.resizeEvent = handle_resize
@@ -536,9 +537,12 @@ class MainWindow(QMainWindow):
         
         # Handle resize events
         def handle_resize(event):
-            self.scene.setSceneRect(0, 0, event.size().width(), event.size().height())
-            self.video_proxy.setGeometry(0, 0, event.size().width(), event.size().height())
-            self.overlay_proxy.setGeometry(0, 0, event.size().width(), event.size().height())
+            width = event.size().width()
+            height = event.size().height()
+            rect = QRectF(0, 0, width, height)
+            self.scene.setSceneRect(rect)
+            self.video_proxy.setGeometry(rect)
+            self.overlay_proxy.setGeometry(rect)
             event.accept()
             
         self.video_container.resizeEvent = handle_resize
