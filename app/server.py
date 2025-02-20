@@ -147,7 +147,20 @@ async def analyze_humor_segments(segments: List[Dict], batch_size: int = 5, cust
                     [f"Segment {i + 1}: {s['text']}" for i, s in enumerate(batch)])
 
                 # Use custom prompt if provided, otherwise use default
-                prompt = custom_prompt.format(segments_text=segments_text) if custom_prompt else DEFAULT_PROMPT.format(segments_text=segments_text)
+                try:
+                    if custom_prompt:
+                        # Double the curly braces to escape them in the format string
+                        escaped_prompt = custom_prompt.replace('{', '{{').replace('}', '}}')
+                        # Replace back the format placeholder
+                        escaped_prompt = escaped_prompt.replace('{{segments_text}}', '{segments_text}')
+                        prompt = escaped_prompt.format(segments_text=segments_text)
+                    else:
+                        # Default prompt already has properly escaped braces
+                        prompt = DEFAULT_PROMPT.format(segments_text=segments_text)
+                except Exception as e:
+                    logger.error(f"Error formatting prompt: {e}")
+                    # Fallback to default prompt
+                    prompt = DEFAULT_PROMPT.format(segments_text=segments_text)
 
                 logger.debug("Sending request to Gemini API")
                 response = await asyncio.to_thread(

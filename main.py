@@ -22,9 +22,10 @@ class ProcessingThread(QThread):
     status_update = pyqtSignal(str)
     processing_finished = pyqtSignal(bool, str)
 
-    def __init__(self, video_path: Path):
+    def __init__(self, video_path: Path, custom_prompt: str = None):
         super().__init__()
         self.video_path = video_path
+        self.custom_prompt = custom_prompt
         self.running = True
 
     def run(self):
@@ -78,6 +79,8 @@ class ProcessingThread(QThread):
                         )
                         data.add_field('chunk_start', str(start_time))
                         data.add_field('chunk_duration', str(chunk_duration))
+                        if self.custom_prompt:
+                            data.add_field('custom_prompt', self.custom_prompt)
                         
                         async with session.post(f"{API_URL}/process-audio-chunk", data=data) as response:
                             if response.status != 200:
@@ -484,6 +487,11 @@ class MainWindow(QMainWindow):
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.status_text.setMinimumHeight(100)
+        self.status_text.setStyleSheet("""
+            QTextEdit {
+                color: black;
+            }
+        """)
         
         # Create video player
         self.video_widget = QVideoWidget()
@@ -539,9 +547,67 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(QLabel("Volume:"))
         controls_layout.addWidget(self.volume_slider)
         
+        # Add prompt editor
+        self.prompt_label = QLabel("Custom Prompt (optional):")
+        self.prompt_label.setStyleSheet("color: #666666; margin: 8px 0;")
+        
+        # Default prompt text from server
+        self.default_prompt = """You are a humor analysis system. Analyze these segments of a transcribed video which may have multiple speakers for humorous content and rate them:
+
+{segments_text}
+
+Return your analysis as a JSON object with this exact format:
+{
+    "segments": [
+        {
+            "segment_number": <number of the segment>,
+            "score": <number 0-100 indicating how funny the text is overall>,
+            "moments": [
+                {
+                    "text": "<Lengthy, exact word-for-word quote of the funny part>",
+                    "reason": "<brief explanation of why this moment is humorous>"
+                }
+            ]
+        }
+    ]
+}
+
+Consider elements like:
+- Unexpected twists or surprises
+- Clever wordplay or puns
+- Amusing situations or scenarios
+- Funny reactions or responses
+- Irony or sarcasm
+- Comedic timing in dialogue
+
+Only include genuinely funny moments. If nothing is funny, return an empty funny_moments array.
+Ensure the "text" field matches words exactly as they appear in the original text."""
+
+        class PromptEditor(QTextEdit):
+            def __init__(self, default_text, parent=None):
+                super().__init__(parent)
+                self._default_text = default_text
+                self.setMinimumHeight(100)
+                self.setStyleSheet("""
+                    QTextEdit {
+                        border: 1px solid #cccccc;
+                        border-radius: 4px;
+                        padding: 8px;
+                        background-color: white;
+                        color: black;
+                    }
+                """)
+                # Use QTimer to set text after initialization
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self.setPlainText(self._default_text))
+
+        self.prompt_editor = PromptEditor(self.default_prompt, self)
+        
         # Add elements to layout
         layout.addWidget(self.file_button)
         layout.addWidget(self.file_label)
+        layout.addWidget(self.prompt_label)
+        layout.addWidget(self.prompt_editor)
         layout.addWidget(self.start_button)
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.video_widget)
@@ -573,7 +639,8 @@ class MainWindow(QMainWindow):
         self.file_button.setEnabled(False)
         self.progress_bar.setValue(0)
         
-        self.processing_thread = ProcessingThread(self.video_path)
+        custom_prompt = self.prompt_editor.toPlainText().strip() or None
+        self.processing_thread = ProcessingThread(self.video_path, custom_prompt)
         self.processing_thread.progress_update.connect(self.update_progress)
         self.processing_thread.status_update.connect(self.log_message)
         self.processing_thread.processing_finished.connect(self.processing_complete)
@@ -806,6 +873,7 @@ def main():
             sys.exit(1)
     
     window = MainWindow()
+    window.prompt_editor.setPlainText(window.default_prompt)
     window.show()
     sys.exit(app.exec())
 
