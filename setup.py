@@ -18,7 +18,7 @@ OPTIONS = {
         'PyQt6.QtNfc', 'PyQt6.QtOpenGL', 'PyQt6.QtPositioning', 'PyQt6.QtQml',
         'PyQt6.QtQuick', 'PyQt6.QtQuickWidgets', 'PyQt6.QtRemoteObjects',
         'PyQt6.QtSensors', 'PyQt6.QtSerialPort', 'PyQt6.QtSql', 'PyQt6.QtTest',
-        'pkg_resources'  # Explicitly exclude pkg_resources
+        'pkg_resources', 'packaging'  # Exclude packaging to avoid conflicts
     ],
     'qt_plugins': ['platforms'],
     'plist': {

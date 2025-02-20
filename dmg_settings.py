@@ -9,17 +9,17 @@ import os.path
 # Volume format (see hdiutil create -help)
 format = 'UDRW'
 
-# Volume size (must be large enough for all files)
+# Volume size (increased to fit both apps)
 size = '500M'
 
 # Files to include
-files = ['dist/Udder AI.app']
+files = ['dist/UdderAI-Installer.app', 'dist/Udder AI.app']
 
 # Symlinks to create
-symlinks = {'Applications': '/Applications'}
+symlinks = { 'Applications': '/Applications' }
 
 # Window configuration
-window_rect = ((100, 100), (640, 400))
+window_rect = ((100, 100), (500, 400))
 default_view = 'icon-view'
 
 # Background
@@ -36,8 +36,9 @@ icon_size = 96
 
 # Icon locations
 icon_locations = {
-    'Udder AI.app': (160, 170),
-    'Applications': (480, 170)
+    'Udder AI.app': (125, 120),
+    'UdderAI-Installer.app': (125, 270),
+    'Applications': (375, 170)
 }
 
 # Window settings

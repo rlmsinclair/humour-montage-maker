@@ -3,13 +3,15 @@ import asyncio
 import json
 import os
 import subprocess
+import platform
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Optional
 import aiofiles
 import aiohttp
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QPushButton, QProgressBar, QLabel, QFileDialog, QTextEdit,
-                            QMessageBox, QSlider)
+                            QMessageBox, QSlider, QComboBox, QInputDialog, QLineEdit)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QUrl, QTime
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
@@ -22,10 +24,11 @@ class ProcessingThread(QThread):
     status_update = pyqtSignal(str)
     processing_finished = pyqtSignal(bool, str)
 
-    def __init__(self, video_path: Path, custom_prompt: str = None):
+    def __init__(self, video_path: Path, custom_prompt: str = None, montage_type: str = "Humor"):
         super().__init__()
         self.video_path = video_path
         self.custom_prompt = custom_prompt
+        self.montage_type = montage_type.lower()
         self.running = True
 
     def run(self):
@@ -36,7 +39,8 @@ class ProcessingThread(QThread):
 
     async def process_video(self):
         try:
-            output_path = Path('funny_montage.mp4')
+            # Use home directory for output file
+            output_path = Path.home() / f'{self.montage_type}_montage.mp4'
             
             # Extract audio
             self.status_update.emit("Extracting audio...")
@@ -62,8 +66,11 @@ class ProcessingThread(QThread):
                     if not self.running:
                         break
                         
-                    # Create chunk
-                    chunk_path = Path(f'temp_chunk_{start_time}.mp3')
+                    # Create temporary directory for chunks
+                    temp_dir = Path(tempfile.mkdtemp(prefix='udder_chunks_'))
+                    
+                    # Create chunk in temp directory
+                    chunk_path = temp_dir / f'chunk_{start_time}.mp3'
                     success = await self.create_audio_chunk(audio_path, start_time, chunk_duration, chunk_path)
                     if not success:
                         continue
@@ -112,7 +119,7 @@ class ProcessingThread(QThread):
                 )
 
                 if success:
-                    self.processing_finished.emit(True, "Successfully created funny_montage.mp4!")
+                    self.processing_finished.emit(True, f"Successfully created {self.montage_type}_montage.mp4!")
                 else:
                     self.processing_finished.emit(False, "Error creating montage!")
             else:
@@ -122,11 +129,11 @@ class ProcessingThread(QThread):
             self.processing_finished.emit(False, f"An error occurred: {e}")
         finally:
             # Cleanup temporary files
-            await self.cleanup_files([audio_path])
+            await self.cleanup_files([audio_path, temp_dir])
 
     @staticmethod
     def get_ffmpeg_path() -> str:
-        # First try system PATH
+        # Try system PATH first since installer ensures FFmpeg is installed
         try:
             result = subprocess.run(['which', 'ffmpeg'], 
                                  capture_output=True, 
@@ -136,23 +143,13 @@ class ProcessingThread(QThread):
         except subprocess.CalledProcessError:
             pass
 
-        # Common installation locations
+        # Common installation locations as fallback
         possible_paths = [
             '/opt/homebrew/bin/ffmpeg',  # Homebrew on Apple Silicon
             '/usr/local/bin/ffmpeg',     # Homebrew on Intel Mac
             '/usr/bin/ffmpeg',           # System install
         ]
         
-        if getattr(sys, 'frozen', False):
-            # Add bundled paths when running as app
-            bundle_dir = Path(sys._MEIPASS) if hasattr(sys, '_MEIPASS') else Path(sys.executable).parent
-            possible_paths.extend([
-                str(bundle_dir / 'bin' / 'ffmpeg'),
-                str(bundle_dir / 'ffmpeg'),
-                str(bundle_dir.parent / 'MacOS' / 'ffmpeg'),
-            ])
-
-        # Try each path
         for path in possible_paths:
             if os.path.isfile(path):
                 return path
@@ -313,8 +310,7 @@ class ProcessingThread(QThread):
         return merged
 
     async def create_montage(self, video_path: Path, clips: List[Dict], output_path: Path) -> bool:
-        temp_dir = Path('temp_clips')
-        temp_dir.mkdir(exist_ok=True)
+        temp_dir = Path(tempfile.mkdtemp(prefix='udder_clips_'))
         self.status_update.emit(f"Created temporary directory: {temp_dir}")
 
         try:
@@ -459,7 +455,64 @@ class MainWindow(QMainWindow):
         self.file_button.clicked.connect(self.select_file)
         
         self.file_label = QLabel("No file selected")
-        self.file_label.setStyleSheet("color: #666666; margin: 8px 0;")
+        self.file_label.setStyleSheet("color: white; margin: 8px 0;")
+        
+        # Add montage type selector
+        self.montage_type_label = QLabel("Montage Type:")
+        self.montage_type_label.setStyleSheet("color: white; margin: 8px 0;")
+        
+        self.montage_type_selector = QComboBox()
+        self.montage_type_selector.setStyleSheet("""
+            QComboBox {
+                border: 2px solid #e0e0e0;
+                border-radius: 6px;
+                padding: 8px 12px;
+                background: white;
+                min-width: 200px;
+                font-size: 14px;
+                color: #333333;
+            }
+            QComboBox:hover {
+                border-color: #2196F3;
+            }
+            QComboBox:focus {
+                border-color: #2196F3;
+                outline: none;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 30px;
+            }
+            QComboBox::down-arrow {
+                width: 12px;
+                height: 12px;
+                margin-right: 8px;
+                border: 2px solid #666666;
+                border-width: 0 2px 2px 0;
+                transform: rotate(45deg);
+            }
+            QComboBox:hover::down-arrow {
+                border-color: #2196F3;
+            }
+            QComboBox QAbstractItemView {
+                border: 2px solid #e0e0e0;
+                border-radius: 6px;
+                padding: 4px;
+                background: white;
+                selection-background-color: #2196F3;
+                selection-color: white;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 8px;
+                margin: 2px;
+                border-radius: 4px;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background: #e3f2fd;
+            }
+        """)
+        self.montage_type_selector.addItems(["Humor", "Drama", "Educational", "Inspiration", "Action"])
+        self.montage_type_selector.currentTextChanged.connect(self.update_prompt)
         
         self.start_button = QPushButton("Start Processing")
         self.start_button.setStyleSheet("""
@@ -486,7 +539,8 @@ class MainWindow(QMainWindow):
         
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
-        self.status_text.setMinimumHeight(100)
+        self.status_text.setMinimumHeight(40)
+        self.status_text.setMaximumHeight(40)
         self.status_text.setStyleSheet("""
             QTextEdit {
                 color: black;
@@ -548,8 +602,8 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.volume_slider)
         
         # Add prompt editor
-        self.prompt_label = QLabel("Custom Prompt (optional):")
-        self.prompt_label.setStyleSheet("color: #666666; margin: 8px 0;")
+        self.prompt_label = QLabel("Custom Prompt (advanced):")
+        self.prompt_label.setStyleSheet("color: white; margin: 8px 0;")
         
         # Default prompt text from server
         self.default_prompt = """You are a humor analysis system. Analyze these segments of a transcribed video which may have multiple speakers for humorous content and rate them:
@@ -603,9 +657,172 @@ Ensure the "text" field matches words exactly as they appear in the original tex
 
         self.prompt_editor = PromptEditor(self.default_prompt, self)
         
+        # Define montage prompts
+        self.montage_prompts = {
+            "Humor": """You are a humor analysis system. Analyze these segments of a transcribed video which may have multiple speakers for humorous content and rate them:
+
+{segments_text}
+
+Return your analysis as a JSON object with this exact format:
+{
+    "segments": [
+        {
+            "segment_number": <number of the segment>,
+            "score": <number 0-100 indicating how funny the text is overall>,
+            "moments": [
+                {
+                    "text": "<Lengthy, exact word-for-word quote of the funny part>",
+                    "reason": "<brief explanation of why this moment is humorous>"
+                }
+            ]
+        }
+    ]
+}
+
+Consider elements like:
+- Unexpected twists or surprises
+- Clever wordplay or puns
+- Amusing situations or scenarios
+- Funny reactions or responses
+- Irony or sarcasm
+- Comedic timing in dialogue
+
+Only include genuinely funny moments. If nothing is funny, return an empty moments array.
+Ensure the "text" field matches words exactly as they appear in the original text.""",
+
+            "Drama": """You are a drama analysis system. Analyze these segments for dramatic, tense, or emotionally powerful moments and rate them:
+
+{segments_text}
+
+Return your analysis as a JSON object with this exact format:
+{
+    "segments": [
+        {
+            "segment_number": <number of the segment>,
+            "score": <number 0-100 indicating how dramatic the text is overall>,
+            "moments": [
+                {
+                    "text": "<Lengthy, exact word-for-word quote of the dramatic part>",
+                    "reason": "<brief explanation of why this moment is dramatic>"
+                }
+            ]
+        }
+    ]
+}
+
+Consider elements like:
+- Intense confrontations or revelations
+- Emotional breakthroughs
+- Suspenseful moments
+- Powerful personal stories
+- Major plot developments
+- Dramatic pauses or silence
+
+Only include genuinely dramatic moments. If nothing is dramatic, return an empty moments array.
+Ensure the "text" field matches words exactly as they appear in the original text.""",
+
+            "Educational": """You are an educational content analyzer. Review these segments for valuable learning moments and key insights:
+
+{segments_text}
+
+Return your analysis as a JSON object with this exact format:
+{
+    "segments": [
+        {
+            "segment_number": <number of the segment>,
+            "score": <number 0-100 indicating how educational the text is overall>,
+            "moments": [
+                {
+                    "text": "<Lengthy, exact word-for-word quote of the educational part>",
+                    "reason": "<brief explanation of why this moment is educational>"
+                }
+            ]
+        }
+    ]
+}
+
+Consider elements like:
+- Clear explanations of complex topics
+- Practical demonstrations
+- Important facts or statistics
+- Memorable analogies or examples
+- Expert insights
+- Teachable moments
+
+Only include genuinely educational moments. If nothing is educational, return an empty moments array.
+Ensure the "text" field matches words exactly as they appear in the original text.""",
+
+            "Inspiration": """You are an inspiration detector. Analyze these segments for motivational and uplifting content:
+
+{segments_text}
+
+Return your analysis as a JSON object with this exact format:
+{
+    "segments": [
+        {
+            "segment_number": <number of the segment>,
+            "score": <number 0-100 indicating how inspirational the text is overall>,
+            "moments": [
+                {
+                    "text": "<Lengthy, exact word-for-word quote of the inspirational part>",
+                    "reason": "<brief explanation of why this moment is inspirational>"
+                }
+            ]
+        }
+    ]
+}
+
+Consider elements like:
+- Personal triumph stories
+- Overcoming challenges
+- Words of wisdom
+- Positive messages
+- Acts of kindness
+- Moments of achievement
+
+Only include genuinely inspirational moments. If nothing is inspirational, return an empty moments array.
+Ensure the "text" field matches words exactly as they appear in the original text.""",
+
+            "Action": """You are an action sequence analyzer. Review these segments for exciting and dynamic moments:
+
+{segments_text}
+
+Return your analysis as a JSON object with this exact format:
+{
+    "segments": [
+        {
+            "segment_number": <number of the segment>,
+            "score": <number 0-100 indicating how action-packed the text is overall>,
+            "moments": [
+                {
+                    "text": "<Lengthy, exact word-for-word quote of the action part>",
+                    "reason": "<brief explanation of why this moment is action-packed>"
+                }
+            ]
+        }
+    ]
+}
+
+Consider elements like:
+- Fast-paced sequences
+- Physical activities
+- Surprising moves or tricks
+- Skilled performances
+- High-energy moments
+- Impressive feats
+
+Only include genuinely action-packed moments. If nothing is action-packed, return an empty moments array.
+Ensure the "text" field matches words exactly as they appear in the original text."""
+        }
+
+        # Set default prompt
+        self.default_prompt = self.montage_prompts["Humor"]
+
         # Add elements to layout
         layout.addWidget(self.file_button)
         layout.addWidget(self.file_label)
+        layout.addWidget(self.montage_type_label)
+        layout.addWidget(self.montage_type_selector)
         layout.addWidget(self.prompt_label)
         layout.addWidget(self.prompt_editor)
         layout.addWidget(self.start_button)
@@ -639,8 +856,9 @@ Ensure the "text" field matches words exactly as they appear in the original tex
         self.file_button.setEnabled(False)
         self.progress_bar.setValue(0)
         
+        montage_type = self.montage_type_selector.currentText()
         custom_prompt = self.prompt_editor.toPlainText().strip() or None
-        self.processing_thread = ProcessingThread(self.video_path, custom_prompt)
+        self.processing_thread = ProcessingThread(self.video_path, custom_prompt, montage_type)
         self.processing_thread.progress_update.connect(self.update_progress)
         self.processing_thread.status_update.connect(self.log_message)
         self.processing_thread.processing_finished.connect(self.processing_complete)
@@ -657,20 +875,22 @@ Ensure the "text" field matches words exactly as they appear in the original tex
         scrollbar.setValue(scrollbar.maximum())
 
     def save_video(self):
-        if not Path('funny_montage.mp4').exists():
+        montage_type = self.montage_type_selector.currentText().lower()
+        montage_path = Path.home() / f'{montage_type}_montage.mp4'
+        if not montage_path.exists():
             return
             
         file_name, _ = QFileDialog.getSaveFileName(
             self,
             "Save Video",
-            str(self.video_path.stem + "_montage.mp4" if self.video_path else "funny_montage.mp4"),
+            str(self.video_path.stem + f"_{montage_type}_montage.mp4" if self.video_path else f"{montage_type}_montage.mp4"),
             "Video Files (*.mp4)"
         )
         
         if file_name:
             try:
                 import shutil
-                shutil.copy2('funny_montage.mp4', file_name)
+                shutil.copy2(str(montage_path), file_name)
                 self.log_message(f"Successfully saved video to: {file_name}")
             except Exception as e:
                 self.log_message(f"Error saving video: {e}")
@@ -687,30 +907,40 @@ Ensure the "text" field matches words exactly as they appear in the original tex
         
         if success:
             self.progress_bar.setValue(100)
+            self.progress_bar.hide()
             # Show and play the video
-            montage_path = Path('funny_montage.mp4')
+            montage_path = Path.home() / f'{self.montage_type_selector.currentText().lower()}_montage.mp4'
             if montage_path.exists():
                 # Add download button
                 download_button = QPushButton("Save Video")
                 download_button.setStyleSheet("""
                     QPushButton {
-                        background-color: #9C27B0;
+                        background-color: #FF4081;
                         color: white;
                         border: none;
-                        padding: 6px 12px;
-                        border-radius: 4px;
-                        font-size: 13px;
+                        padding: 12px 24px;
+                        border-radius: 6px;
+                        font-size: 16px;
+                        font-weight: bold;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                        transition: all 0.3s ease;
                     }
                     QPushButton:hover {
-                        background-color: #7B1FA2;
+                        background-color: #FF80AB;
+                        transform: scale(1.05);
+                        box-shadow: 0 4px 8px rgba(0,0,0,0.3);
                     }
                 """)
                 download_button.clicked.connect(self.save_video)
                 self.centralWidget().layout().insertWidget(
-                    self.centralWidget().layout().indexOf(self.video_widget) + 1,
+                    self.centralWidget().layout().indexOf(self.start_button) + 1,
                     download_button
                 )
                 
+                # Trigger save dialog immediately
+                self.save_video()
+                
+                # Show video player
                 self.video_widget.show()
                 self.video_controls.show()
                 self.media_player.setSource(QUrl.fromLocalFile(str(montage_path.absolute())))
@@ -752,6 +982,9 @@ Ensure the "text" field matches words exactly as they appear in the original tex
     def set_volume(self, volume):
         self.audio_output.setVolume(volume / 100.0)
     
+    def update_prompt(self, montage_type: str):
+        self.prompt_editor.setPlainText(self.montage_prompts[montage_type])
+        
     def closeEvent(self, event):
         if self.processing_thread and self.processing_thread.isRunning():
             self.processing_thread.stop()
@@ -760,120 +993,72 @@ Ensure the "text" field matches words exactly as they appear in the original tex
 
 
 def check_ffmpeg_installed() -> bool:
+    # First check if ffmpeg is in PATH
     try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+        result = subprocess.run(['which', 'ffmpeg'], capture_output=True, text=True, check=True)
+        ffmpeg_path = result.stdout.strip()
+        if ffmpeg_path:
+            try:
+                subprocess.run([ffmpeg_path, '-version'], capture_output=True, check=True)
+                return True
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                pass
+    except subprocess.CalledProcessError:
+        pass
 
-def install_ffmpeg():
-    # Script content
-    script_content = '''#!/bin/bash
-
-# Function to run command as non-root user
-run_as_user() {
-    if [ $(id -u) = 0 ]; then
-        # If running as root, switch to the sudo user
-        local real_user=$(who am i | awk '{print $1}')
-        su - $real_user -c "$1"
-    else
-        # If already non-root, just run the command
-        eval "$1"
-    fi
-}
-
-echo "Checking dependencies..."
-
-# Check if Homebrew is installed
-if ! command -v brew &> /dev/null; then
-    echo "Installing Homebrew..."
-    run_as_user '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-fi
-
-# Check if ffmpeg is installed
-if ! command -v ffmpeg &> /dev/null; then
-    echo "Installing ffmpeg..."
-    run_as_user 'brew install ffmpeg'
-fi
-
-echo "Dependencies installation complete!"
-'''
+    # Check common installation paths
+    ffmpeg_paths = [
+        '/opt/homebrew/bin/ffmpeg',  # Homebrew on Apple Silicon
+        '/usr/local/bin/ffmpeg',     # Homebrew on Intel Mac
+        '/usr/bin/ffmpeg',           # System install
+    ]
     
-    # Create temporary script file
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
-        script_path = Path(f.name)
-        f.write(script_content)
-    
-    try:
-        # Make script executable
-        os.chmod(script_path, 0o755)
-        print(f"Created temporary script at: {script_path}")
-        # Execute script
-        cmd = ['bash', str(script_path)]
-        print(f"Executing command: {cmd}")
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        stdout, stderr = process.communicate()
-        
-        if process.returncode == 0:
-            return True, "FFmpeg installed successfully"
-        else:
-            error_msg = stderr.strip() if stderr else stdout.strip() if stdout else "Unknown error occurred"
-            print(f"Process failed with error: {error_msg}")
-            return False, f"Installation failed: {error_msg}"
-        
-    except subprocess.CalledProcessError as e:
-        return False, f"Installation failed: {str(e)}"
-    except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
-    finally:
-        # Clean up temporary script
+    for path in ffmpeg_paths:
         try:
-            os.unlink(script_path)
-        except Exception:
-            pass
+            if os.path.isfile(path):
+                subprocess.run([path, '-version'], capture_output=True, check=True)
+                return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    
+    return False
+
+def get_sudo_password(parent=None) -> str:
+    """Get sudo password from user using Qt dialog."""
+    password, ok = QInputDialog.getText(
+        parent,
+        "Authentication Required",
+        "Enter your password to install FFmpeg:",
+        QLineEdit.EchoMode.Password
+    )
+    return password if ok else ""
+
+def show_dependency_instructions(parent=None):
+    msg = QMessageBox(parent)
+    msg.setIcon(QMessageBox.Icon.Information)
+    msg.setWindowTitle("Dependencies Required")
+    msg.setText("FFmpeg is required but not installed.")
+    msg.setInformativeText(
+        "To install the required dependencies:\n\n"
+        "1. Install Homebrew by visiting:\n"
+        "   https://brew.sh\n\n"
+        "2. Open Terminal and run:\n"
+        "   brew install ffmpeg\n\n"
+        "After installing, restart the application."
+    )
+    msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+    return msg.exec()
 
 def main():
     app = QApplication(sys.argv)
+    window = MainWindow()
+    window.prompt_editor.setPlainText(window.default_prompt)
     
     # Check if ffmpeg is installed
     if not check_ffmpeg_installed():
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setWindowTitle("FFmpeg Required")
-        msg.setText("FFmpeg is required but not installed.")
-        msg.setInformativeText("Would you like to install it now?")
-        msg.setStandardButtons(
-            QMessageBox.StandardButton.Yes | 
-            QMessageBox.StandardButton.No
-        )
-        
-        if msg.exec() == QMessageBox.StandardButton.Yes:
-            success, message = install_ffmpeg()
-            if success:
-                QMessageBox.information(
-                    None,
-                    "Success",
-                    message
-                )
-            else:
-                QMessageBox.critical(
-                    None,
-                    "Error",
-                    message
-                )
-                sys.exit(1)
-        else:
-            sys.exit(1)
+        show_dependency_instructions(window)
+        sys.exit(1)
     
-    window = MainWindow()
-    window.prompt_editor.setPlainText(window.default_prompt)
     window.show()
     sys.exit(app.exec())
 
