@@ -31,6 +31,41 @@ gemini_client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 
 app = FastAPI()
 
+@app.on_event("startup")
+async def startup_event():
+    """Verify ffmpeg is available at startup"""
+    try:
+        # Check ffmpeg
+        ffmpeg_path = FFmpegHelper.find_executable(FFmpegHelper.FFMPEG_PATHS)
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg_path, '-version',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode == 0:
+            logger.info(f"ffmpeg found at {ffmpeg_path}")
+            logger.info(f"ffmpeg version: {stdout.decode().splitlines()[0]}")
+        else:
+            logger.error(f"ffmpeg check failed: {stderr.decode()}")
+            
+        # Check ffprobe
+        ffprobe_path = FFmpegHelper.find_executable(FFmpegHelper.FFPROBE_PATHS)
+        process = await asyncio.create_subprocess_exec(
+            ffprobe_path, '-version',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode == 0:
+            logger.info(f"ffprobe found at {ffprobe_path}")
+            logger.info(f"ffprobe version: {stdout.decode().splitlines()[0]}")
+        else:
+            logger.error(f"ffprobe check failed: {stderr.decode()}")
+            
+    except Exception as e:
+        logger.error(f"Error checking ffmpeg/ffprobe: {str(e)}")
+
 # Settings
 CHUNK_DURATION = 60  # Duration in seconds per chunk
 MAX_CONCURRENT_CHUNKS = 4
@@ -41,16 +76,12 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 class FFmpegHelper:
     FFMPEG_PATHS = [
         '/usr/bin/ffmpeg',
-        '/usr/local/bin/ffmpeg',
-        '/app/vendor/ffmpeg/ffmpeg',
-        '/app/.heroku/vendor/ffmpeg/ffmpeg'
+        '/usr/local/bin/ffmpeg'
     ]
     
     FFPROBE_PATHS = [
         '/usr/bin/ffprobe',
-        '/usr/local/bin/ffprobe',
-        '/app/vendor/ffmpeg/ffprobe',
-        '/app/.heroku/vendor/ffmpeg/ffprobe'
+        '/usr/local/bin/ffprobe'
     ]
 
     @staticmethod
