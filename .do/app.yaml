@@ -1,5 +1,30 @@
-packages:
-  - ffmpeg
-  - libavcodec-extra
-  - libavformat-dev
-  - libavutil-dev
+name: udder
+services:
+  - name: web
+    environment_slug: python
+    build_command: pip install -r requirements.txt
+    run_command: uvicorn app:app --host 0.0.0.0 --port $PORT
+    github:
+      branch: master
+      deploy_on_push: true
+    envs:
+      - key: OPENAI_API_KEY
+        scope: RUN_TIME
+        value: ${OPENAI_API_KEY}
+      - key: GEMINI_API_KEY
+        scope: RUN_TIME
+        value: ${GEMINI_API_KEY}
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    routes:
+      - path: /
+    http_port: 8080
+jobs:
+  - name: install-deps
+    kind: PRE_DEPLOY
+    git:
+      repo_clone_url: ${_self}
+      branch: ${_self}
+    run_command: |
+      apt-get update
+      apt-get install -y ffmpeg libavcodec-extra libavformat-dev libavutil-dev
