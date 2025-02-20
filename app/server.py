@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
@@ -8,28 +8,69 @@ from pathlib import Path
 import asyncio
 import json
 from typing import List, Dict
-import hashlib
-import time
 import logging
+import subprocess
+import uuid
+import time
+
 from openai import AsyncOpenAI
 from google import genai
 from dotenv import load_dotenv
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('api.log')
-    ]
+import logging.handlers
+
+# Configure logging with rotating file handler
+log_formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
 )
+
+# Application logger
+app_handler = logging.handlers.RotatingFileHandler(
+    'app.log',
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5
+)
+app_handler.setFormatter(log_formatter)
+
+# Separate uvicorn access log
+access_handler = logging.handlers.RotatingFileHandler(
+    'access.log',
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5
+)
+access_handler.setFormatter(log_formatter)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(console_handler)
+root_logger.addHandler(app_handler)
+
+# Configure uvicorn loggers
+logging.getLogger("uvicorn.access").handlers = [access_handler, console_handler]
+logging.getLogger("uvicorn.error").handlers = [app_handler, console_handler]
+
+# Get application logger
 logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+
+# Initialize API clients
 openai_client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 gemini_client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
+
+# Global state for analysis
+analysis_state = {
+    'in_progress': False,
+    'last_activity': None,
+    'error': None,
+    'clips': []
+}
 
 app = FastAPI()
 
@@ -42,23 +83,156 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
-# Default prompt template
-DEFAULT_PROMPT = """You are a humor analysis system. Analyze these segments of a transcribed video which may have multiple speakers for humorous content and rate them:
+# A default prompt if none provided
+DEFAULT_PROMPT = """You are a humor analysis system. Analyze these segments... {segments_text} ..."""
 
-{segments_text}
+# Settings
+MAX_RETRIES = 3
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+
+#################################
+# HELPER: Transcription Function
+#################################
+
+def group_words_into_segments(words: List[Dict], max_segment_duration: float = 30.0) -> List[Dict]:
+    """Group words into segments of specified maximum duration."""
+    if not words:
+        return []
+        
+    segments = []
+    current_segment = {
+        'start_time': words[0]['start'],
+        'end_time': words[0]['end'],
+        'words': [words[0]],
+        'text': words[0]['text']
+    }
+    
+    for word in words[1:]:
+        # If adding this word would exceed max duration, start new segment
+        if word['end'] - current_segment['start_time'] > max_segment_duration:
+            segments.append(current_segment)
+            current_segment = {
+                'start_time': word['start'],
+                'end_time': word['end'],
+                'words': [word],
+                'text': word['text']
+            }
+        else:
+            current_segment['end_time'] = word['end']
+            current_segment['words'].append(word)
+            current_segment['text'] += ' ' + word['text']
+            
+    segments.append(current_segment)
+    return segments
+
+async def transcribe_chunk(audio_path: Path, offset: float = 0) -> List[Dict]:
+    """
+    Transcribe the given audio chunk using OpenAI Whisper API.
+    Return a list of word-level info: [{ 'text': str, 'start': float, 'end': float }, ...]
+    """
+    if not audio_path.exists():
+        logger.warning(f"Audio file does not exist: {audio_path}")
+        return []
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            logger.debug(f"Transcribing audio: {audio_path} (attempt {attempt + 1}/{MAX_RETRIES})")
+            
+            logger.info("Sending request to OpenAI Whisper API...")
+            with open(audio_path, "rb") as audio:
+                transcript_response = await openai_client.audio.transcriptions.create(
+                    file=audio,
+                    model="whisper-1",
+                    response_format="verbose_json",
+                    timestamp_granularities=["word"]
+                )
+            logger.info("Successfully received Whisper response")
+            
+            # Extract words with timestamps
+            logger.debug("Processing transcript response...")
+            words = []
+            if isinstance(transcript_response, dict):
+                logger.debug("Response is dictionary format")
+                words = (transcript_response.get('words', []) or 
+                        transcript_response.get('segments', []) or 
+                        transcript_response.get('word_segments', []))
+            elif hasattr(transcript_response, 'words'):
+                logger.debug("Response has words attribute")
+                words = transcript_response.words
+            
+            logger.info(f"Found {len(words)} words in transcript")
+            
+            # Convert words to our format
+            logger.debug("Converting words to standard format...")
+            formatted_words = []
+            for word in words:
+                try:
+                    if isinstance(word, dict):
+                        start = float(word.get('start', word.get('start_time', 0)))
+                        end = float(word.get('end', word.get('end_time', 0)))
+                        text = word.get('word', word.get('text', ''))
+                    else:
+                        start = float(getattr(word, 'start', getattr(word, 'start_time', 0)))
+                        end = float(getattr(word, 'end', getattr(word, 'end_time', 0)))
+                        text = getattr(word, 'word', getattr(word, 'text', ''))
+
+                    # Adjust by offset
+                    start += offset
+                    end += offset
+
+                    formatted_words.append({
+                        'text': text,
+                        'start': start,
+                        'end': end
+                    })
+                except Exception as e:
+                    logger.error(f"Error processing word: {e}")
+                    continue
+                    
+            logger.debug(f"Formatted {len(formatted_words)} words")
+            return formatted_words
+
+        except Exception as e:
+            if attempt < MAX_RETRIES - 1:
+                retry_delay = 5 * (attempt + 1)
+                logger.warning(f"Transcription attempt {attempt + 1} failed: {e}. Retrying in {retry_delay}s")
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error(f"All transcription retries failed for {audio_path}: {e}")
+                return []
+    return []
+
+
+##############################
+# HELPER: AI Analysis
+##############################
+
+async def analyze_humor_segments(segments: List[Dict], custom_prompt: str = None) -> List[Dict]:
+    """
+    Analyze segments for humor using Gemini.
+    """
+    if not segments:
+        return []
+
+    logger.info("\n=== Starting humor analysis ===")
+    analyzed_segments = []
+    for i, segment in enumerate(segments, 1):
+        logger.info(f"\nAnalyzing segment {i}/{len(segments)}")
+        logger.info(f"Segment text: {segment['text'][:100]}...")
+
+        prompt = f"""Analyze this text for humorous content and rate it:
+
+{segment['text']}
 
 Return your analysis as a JSON object with this exact format:
 {{
-    "segments": [
+    "score": <number 0-100 indicating how funny the text is overall>,
+    "funny_moments": [
         {{
-            "segment_number": <number of the segment>,
-            "score": <number 0-100 indicating how funny the text is overall>,
-            "moments": [
-                {{
-                    "text": "<Lengthy, exact word-for-word quote of the funny part>",
-                    "reason": "<brief explanation of why this moment is humorous>"
-                }}
-            ]
+            "text": "<exact word-for-word quote of the funny part>",
+            "reason": "<brief explanation of why this moment is humorous>"
         }}
     ]
 }}
@@ -71,288 +245,373 @@ Consider elements like:
 - Irony or sarcasm
 - Comedic timing in dialogue
 
-Only include genuinely funny moments. If nothing is funny, return an empty moments array.
+Only include genuinely funny moments. If nothing is funny, return an empty funny_moments array.
 Ensure the "text" field matches words exactly as they appear in the original text."""
 
-# Settings
-MAX_RETRIES = 3
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
-
-async def transcribe_chunk(chunk_path: Path, offset: float = 0) -> List[Dict]:
-    if not chunk_path.exists():
-        logger.warning(f"Chunk file does not exist: {chunk_path}")
-        return []
-
-    for attempt in range(MAX_RETRIES):
+        logger.info("Sending request to Gemini...")
         try:
-            logger.debug(f"Transcribing chunk: {chunk_path} (attempt {attempt + 1}/{MAX_RETRIES})")
-            with open(chunk_path, "rb") as audio_file:
-                response = await openai_client.audio.transcriptions.create(
-                    file=audio_file,
-                    model="whisper-1",
-                    response_format="verbose_json",
-                    timestamp_granularities=["word"]
-                )
-            logger.debug(f"Successfully got transcription response for {chunk_path}")
-
-            words = []
-            if isinstance(response, dict):
-                words = (response.get('words', []) or
-                        response.get('segments', []) or
-                        response.get('word_segments', []))
-            elif hasattr(response, 'words'):
-                words = response.words
-            elif hasattr(response, 'segments'):
-                words = response.segments
-            logger.debug(f"Extracted {len(words)} words from response")
-
-            result = []
-            for word in words:
-                try:
-                    if isinstance(word, dict):
-                        start = float(word.get('start', word.get('start_time', 0)))
-                        end = float(word.get('end', word.get('end_time', 0)))
-                        text = word.get('word', word.get('text', ''))
-                    else:
-                        start = float(getattr(word, 'start', getattr(word, 'start_time', 0)))
-                        end = float(getattr(word, 'end', getattr(word, 'end_time', 0)))
-                        text = getattr(word, 'word', getattr(word, 'text', ''))
-
-                    result.append({
-                        'text': text,
-                        'start': offset + start,
-                        'end': offset + end
-                    })
-                except Exception as e:
-                    logger.warning(f"Failed to process word: {e}")
-                    continue
-
-            logger.debug(f"Successfully processed {len(result)} words for chunk {chunk_path}")
-            return result
-
-        except Exception as e:
-            if attempt < MAX_RETRIES - 1:
-                retry_delay = 5 * (attempt + 1)
-                logger.warning(f"Attempt {attempt + 1} failed for chunk {chunk_path}: {e}. Retrying in {retry_delay}s")
-                await asyncio.sleep(retry_delay)
-            else:
-                logger.error(f"All retries failed for chunk {chunk_path}: {e}")
-                return []
-    return []
-
-async def analyze_humor_segments(segments: List[Dict], batch_size: int = 5, custom_prompt: str = None) -> List[Dict]:
-    logger.info(f"Starting humor analysis for {len(segments)} segments with batch size {batch_size}")
-    results = []
-    semaphore = asyncio.Semaphore(2)
-
-    # Group segments into batches
-    batches = [segments[i:i + batch_size] for i in range(0, len(segments), batch_size)]
-    logger.info(f"Created {len(batches)} batches")
-
-    async def analyze_batch(batch: List[Dict]) -> List[Dict]:
-        async with semaphore:
-            try:
-                logger.debug(f"Analyzing batch of {len(batch)} segments")
-                segments_text = "\n---\n".join(
-                    [f"Segment {i + 1}: {s['text']}" for i, s in enumerate(batch)])
-
-                # Use custom prompt if provided, otherwise use default
-                try:
-                    if custom_prompt:
-                        # Double the curly braces to escape them in the format string
-                        escaped_prompt = custom_prompt.replace('{', '{{').replace('}', '}}')
-                        # Replace back the format placeholder
-                        escaped_prompt = escaped_prompt.replace('{{segments_text}}', '{segments_text}')
-                        prompt = escaped_prompt.format(segments_text=segments_text)
-                    else:
-                        # Default prompt already has properly escaped braces
-                        prompt = DEFAULT_PROMPT.format(segments_text=segments_text)
-                except Exception as e:
-                    logger.error(f"Error formatting prompt: {e}")
-                    # Fallback to default prompt
-                    prompt = DEFAULT_PROMPT.format(segments_text=segments_text)
-
-                logger.debug("Sending request to Gemini API")
-                response = await asyncio.to_thread(
-                    gemini_client.models.generate_content,
+            response = await asyncio.to_thread(
+                lambda: gemini_client.models.generate_content(
                     model="gemini-2.0-flash",
                     contents=prompt
                 )
-                logger.debug("Received response from Gemini API")
-
-                text = response.text.strip()
-                start_idx = text.find('{')
-                end_idx = text.rfind('}') + 1
-                json_str = text[start_idx:end_idx] if start_idx >= 0 and end_idx > start_idx else '{"segments": []}'
-
-                try:
-                    analysis = json.loads(json_str)
-                    batch_results = []
-                    logger.debug(f"Successfully parsed JSON response with {len(analysis.get('segments', []))} segments")
-
-                    for segment_analysis in analysis.get('segments', []):
-                        logger.debug(f"Processing segment {segment_analysis.get('segment_number', '?')} with score {segment_analysis.get('score', 0)}")
-                        segment_num = segment_analysis.get('segment_number', 1) - 1
-                        if segment_num < 0 or segment_num >= len(batch):
-                            continue
-
-                        segment = batch[segment_num]
-                        funny_clips = []
-
-                        for moment in segment_analysis.get('moments', []):
-                            try:
-                                words = moment.get('text', '').split()
-                                for i in range(len(segment.get('words', [])) - len(words) + 1):
-                                    segment_words = segment['words'][i:i + len(words)]
-                                    if ' '.join(w.get('text', '') for w in segment_words).lower() == ' '.join(words).lower():
-                                        funny_clips.append({
-                                            'start_time': segment_words[0].get('start', 0),
-                                            'end_time': segment_words[-1].get('end', 0),
-                                            'text': moment.get('text', ''),
-                                            'reason': moment.get('reason', 'Unknown reason')
-                                        })
-                                        break
-                            except Exception:
-                                continue
-
-                        batch_results.append({
-                            **segment,
-                            'humor_score': segment_analysis.get('score', 0),
-                            'funny_clips': funny_clips
-                        })
-
-                    logger.debug(f"Successfully processed batch with {len(batch_results)} results")
-                    return batch_results
-
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse JSON response: {e}")
-                    return [{**segment, 'humor_score': 0, 'funny_clips': []} for segment in batch]  # Keep funny_clips in output for backward compatibility
-
-            except Exception as e:
-                logger.error(f"Error analyzing batch: {e}", exc_info=True)
-                return [{**segment, 'humor_score': 0, 'funny_clips': []} for segment in batch]  # Keep funny_clips in output for backward compatibility
-
-    # Process batches
-    logger.info("Processing all batches")
-    batch_results = await asyncio.gather(*[analyze_batch(batch) for batch in batches])
-    
-    # Flatten results
-    for batch in batch_results:
-        results.extend(batch)
-
-    logger.info(f"Completed humor analysis with {len(results)} total results")
-    return results
-
-def group_words_into_segments(words: List[Dict], segment_duration: int = 120, overlap: int = 20) -> List[Dict]:
-    segments = []
-    if not words:
-        return segments
-        
-    total_duration = words[-1]['end']
-
-    for segment_start in range(0, int(total_duration), segment_duration - overlap):
-        segment_words = []
-        segment_end = segment_start + segment_duration
-        padding = 5
-
-        for word in words:
-            if (word['start'] >= segment_start - padding and
-                    word['end'] <= segment_end + padding):
-                segment_words.append(word)
-
-        if segment_words:
-            segments.append({
-                'start_time': segment_start,
-                'end_time': segment_end,
-                'words': segment_words,
-                'text': ' '.join(w['text'] for w in segment_words)
+            )
+            text = response.text
+            logger.info("Received Gemini response")
+        except Exception as e:
+            logger.error(f"Gemini API error: {str(e)}")
+            logger.info("Skipping this segment due to API error")
+            analyzed_segments.append({
+                'start_time': segment['start_time'],
+                'end_time': segment['end_time'],
+                'text': segment['text'],
+                'humor_score': 0,
+                'funny_clips': []
             })
+            continue
 
-    return segments
+        try:
+            # Extract JSON from response
+            start_idx = text.find('{')
+            end_idx = text.rfind('}') + 1
 
-from fastapi import Form
+            if start_idx >= 0 and end_idx > start_idx:
+                try:
+                    analysis = json.loads(text[start_idx:end_idx])
+                    logger.info(f"Humor score: {analysis.get('score', 0)}")
+                    logger.info(f"Found {len(analysis.get('funny_moments', []))} funny moments")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON response: {e}")
+                    raise
+            else:
+                logger.error("No valid JSON found in response")
+                raise ValueError("No valid JSON in Gemini response")
+        except Exception as e:
+            logger.error(f"Error processing Gemini response: {str(e)}")
+            logger.info("Skipping this segment due to processing error")
+            analyzed_segments.append({
+                'start_time': segment['start_time'],
+                'end_time': segment['end_time'],
+                'text': segment['text'],
+                'humor_score': 0,
+                'funny_clips': []
+            })
+            continue
+
+        funny_clips = []
+        try:
+            for moment in analysis.get('funny_moments', []):
+                try:
+                    if not isinstance(moment, dict) or 'text' not in moment or 'reason' not in moment:
+                        logger.warning("Skipping malformed funny moment")
+                        continue
+
+                    words = moment['text'].split()
+                    for i in range(len(segment['words']) - len(words) + 1):
+                        segment_words = segment['words'][i:i+len(words)]
+                        if ' '.join(w['text'] for w in segment_words).lower() == ' '.join(words).lower():
+                            clip = {
+                                'start_time': segment_words[0]['start'],
+                                'end_time': segment_words[-1]['end'],
+                                'text': moment['text'],
+                                'reason': moment['reason']
+                            }
+                            logger.info(f"Found funny clip: {clip['start_time']}s - {clip['end_time']}s")
+                            funny_clips.append(clip)
+                            break
+                except Exception as e:
+                    logger.error(f"Error processing funny moment: {str(e)}")
+                    continue
+        except Exception as e:
+            logger.error(f"Error processing funny moments array: {str(e)}")
+
+        analyzed_segments.append({
+            'start_time': segment['start_time'],
+            'end_time': segment['end_time'],
+            'text': segment['text'],
+            'humor_score': analysis.get('score', 0),
+            'funny_clips': funny_clips
+        })
+
+        # Update activity timestamp after each segment
+        analysis_state['last_activity'] = time.time()
+
+    return analyzed_segments
+
+
+##############################################
+# ENDPOINT: Process entire video in one pass
+##############################################
+
+@app.post("/process-video-whole")
+async def process_video_whole(
+    file: UploadFile = File(...),
+    video_duration: float = Form(...),
+    custom_prompt: str = Form(None),
+):
+    """
+    Receives the full video file once. We'll:
+     1) Save the video to disk.
+     2) Optionally chunk it using ffmpeg (by time).
+     3) Transcribe each chunk, run AI analysis, gather funny/relevant clips.
+     4) Return them to the client.
+    """
+    try:
+        logger.info(f"Starting full-video chunk-based processing for file: {file.filename}")
+        logger.info(f"Video duration: {video_duration} seconds")
+
+        # 1. Save the full video to a temporary file
+        file_id = str(uuid.uuid4())
+        logger.info(f"Generated processing ID: {file_id}")
+        temp_video_path = f"temp_{file_id}.mp4"
+        logger.debug(f"Saving entire video to {temp_video_path}")
+        async with aiofiles.open(temp_video_path, 'wb') as out_file:
+            content = await file.read()
+            await out_file.write(content)
+        logger.debug("Video file saved successfully.")
+
+        # 2. We'll do chunk-based audio extraction in a loop, for example:
+        #    chunk ~2 minutes at a time
+        chunk_duration = 120  # 2 minutes
+        overlap = 0           # optional overlap in seconds
+        start = 0.0
+        step = chunk_duration - overlap
+        all_clips = []
+
+        while start < video_duration:
+            end = min(start + chunk_duration, video_duration)
+            # 2a. Extract audio for [start, end] using ffmpeg
+            audio_path = f"temp_{file_id}_{int(start)}.mp3"
+            logger.info(f"Processing chunk {int(start/chunk_duration) + 1}: {start:.1f}s to {end:.1f}s => {audio_path}")
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-i", temp_video_path,
+                "-ss", str(start),
+                "-to", str(end),
+                "-vn",
+                "-acodec", "mp3",
+                audio_path
+            ]
+            try:
+                logger.debug(f"Running FFmpeg command: {' '.join(ffmpeg_cmd)}")
+                process = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
+                logger.debug("FFmpeg chunk extraction completed successfully")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"FFmpeg error chunk [{start}-{end}]: {e.stderr}")
+                break
+
+            # 2b. Transcribe that audio chunk (offset the word times by `start`)
+            logger.info(f"Starting transcription for chunk {int(start/chunk_duration) + 1}")
+            words = await transcribe_chunk(Path(audio_path), offset=start)
+            logger.info(f"Transcription complete for chunk {int(start/chunk_duration) + 1}: {len(words)} words found")
+
+            # 2c. We'll store each chunk as a segment. After the loop, we batch-analyze them.
+            segment_text = " ".join(w["text"] for w in words)
+            segment = {
+                "start_time": start,
+                "end_time": end,
+                "words": words,
+                "text": segment_text
+            }
+
+            # For demonstration, let's do immediate analysis per chunk
+            # (Alternatively, gather all segments first and analyze once in a big batch.)
+            logger.info(f"Starting humor analysis for chunk {int(start/chunk_duration) + 1}")
+            results = await analyze_humor_segments([segment], custom_prompt)
+            logger.info(f"Humor analysis complete for chunk {int(start/chunk_duration) + 1}")
+            if results:
+                # Check the first (and only) segment's humor score, if >= 40 => keep funny_clips
+                seg = results[0]
+                if seg.get("humor_score", 0) >= 40:
+                    all_clips.extend(seg.get("funny_clips", []))
+
+            # Cleanup chunk audio
+            if os.path.exists(audio_path):
+                logger.debug(f"Cleaning up temporary audio file: {audio_path}")
+                os.remove(audio_path)
+
+            start += step
+
+        # Return all discovered clips
+        logger.info(f"Video processing complete. Found {len(all_clips)} total clips.")
+        logger.info("-------- End of video processing --------")
+        return {"clips": all_clips}
+
+    except Exception as e:
+        logger.error(f"Error in /process-video-whole: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    finally:
+        # Remove the temporary video
+        try:
+            if os.path.exists(temp_video_path):
+                os.remove(temp_video_path)
+        except Exception as cleanup_err:
+            logger.warning(f"Error removing temp video: {cleanup_err}")
+
+
+##############################################
+# ENDPOINT: Process a single audio chunk
+# (Used when we do in-browser extraction)
+##############################################
 
 @app.post("/process-audio-chunk")
 async def process_audio_chunk(
     file: UploadFile = File(...),
     chunk_start: float = Form(...),
     chunk_duration: float = Form(...),
-    custom_prompt: str = Form(None)  # Optional custom prompt parameter
+    custom_prompt: str = Form(None),
 ):
+    """
+    Process an audio chunk and analyze it for humor.
+    """
+    global analysis_state
     try:
-        # Validate file format
+        # Validate format
         if not file.filename.lower().endswith(('.mp3', '.wav', '.m4a', '.aac')):
             logger.error(f"Unsupported file format: {file.filename}")
             return JSONResponse(
                 status_code=400,
-                content={"error": "Unsupported file format. Please upload an MP3, WAV, M4A, or AAC file."}
+                content={"error": "Unsupported file format. Must be MP3, WAV, M4A, or AAC."}
             )
-            
-        logger.info(f"Received audio chunk starting at {chunk_start}s with duration {chunk_duration}s")
-        
-        # Save chunk file
-        chunk_path = UPLOAD_DIR / f"chunk_{chunk_start}.mp3"
-        async with aiofiles.open(chunk_path, 'wb') as f:
+
+        logger.info(f"Received in-browser audio chunk from {chunk_start}s to {chunk_start+chunk_duration}s")
+
+        # Save to disk
+        temp_audio_path = UPLOAD_DIR / f"inbrowser_{uuid.uuid4()}.mp3"
+        async with aiofiles.open(temp_audio_path, 'wb') as out_file:
             content = await file.read()
-            await f.write(content)
-        logger.info(f"Saved chunk to {chunk_path}")
+            await out_file.write(content)
 
-        # Transcribe chunk
-        logger.info("Starting transcription process")
-        words = await transcribe_chunk(chunk_path, chunk_start)
-        logger.info(f"Transcription complete, got {len(words)} words")
+        try:
+            logger.info("\n=== Starting Whisper transcription ===")
+            words = []
 
-        # Group words into a segment
-        segment = {
-            'start_time': chunk_start,
-            'end_time': chunk_start + chunk_duration,
-            'words': words,
-            'text': ' '.join(w['text'] for w in words)
-        }
+            # Update activity timestamp
+            analysis_state['last_activity'] = time.time()
 
-        # Analyze humor for this segment
-        analyzed_segments = await analyze_humor_segments([segment], custom_prompt=custom_prompt)
-        
-        # Extract funny clips from this segment
-        funny_clips = []
-        if analyzed_segments:
-            segment = analyzed_segments[0]
-            humor_score = segment.get('humor_score', 0)
-            if humor_score >= 40:
-                funny_clips.extend(segment.get('funny_clips', []))  # Keep using funny_clips in API response for backward compatibility
+            # Transcribe audio using OpenAI Whisper
+            words = await transcribe_chunk(temp_audio_path, offset=chunk_start)
+            logger.info(f"Transcription complete: {len(words)} words found")
 
-        # Cleanup chunk file
-        if chunk_path.exists():
-            os.remove(chunk_path)
-            logger.debug(f"Removed chunk file: {chunk_path}")
+            # Group words into segments
+            segments = group_words_into_segments(words)
+            logger.info(f"Created {len(segments)} segments")
 
-        return {
-            "chunk_start": chunk_start,
-            "chunk_duration": chunk_duration,
-            "clips": funny_clips
-        }
+            # Update activity timestamp
+            analysis_state['last_activity'] = time.time()
+
+            # Analyze segments for humor
+            analyzed_segments = await analyze_humor_segments(segments, custom_prompt)
+
+            logger.info("\n=== Processing final clips ===")
+            # Filter and merge funny clips
+            funny_clips = []
+            for segment in analyzed_segments:
+                if segment['humor_score'] >= 40:
+                    funny_clips.extend(segment['funny_clips'])
+
+            logger.info(f"Found {len(funny_clips)} total funny clips")
+
+            # Merge overlapping clips
+            try:
+                if funny_clips:
+                    logger.info("\nMerging overlapping clips...")
+                    max_gap = 2.0  # Maximum gap between clips to merge
+                    min_duration = 3.0  # Minimum duration for a clip
+                    
+                    try:
+                        sorted_clips = sorted(funny_clips, key=lambda x: x['start_time'])
+                        merged = []
+                        
+                        if sorted_clips:  # Check if there are clips to process
+                            current = sorted_clips[0]
+                            
+                            for next_clip in sorted_clips[1:]:
+                                try:
+                                    if next_clip['start_time'] - current['end_time'] <= max_gap:
+                                        logger.info(f"Merging clips: {current['start_time']}s-{current['end_time']}s with {next_clip['start_time']}s-{next_clip['end_time']}s")
+                                        current = {
+                                            'start_time': current['start_time'],
+                                            'end_time': next_clip['end_time'],
+                                            'text': current['text'] + ' ' + next_clip['text'],
+                                            'reason': current['reason'] + ' & ' + next_clip['reason']
+                                        }
+                                    else:
+                                        if current['end_time'] - current['start_time'] >= min_duration:
+                                            merged.append(current)
+                                        current = next_clip
+                                except Exception as e:
+                                    logger.error(f"Error merging clip: {str(e)}")
+                                    continue
+                            
+                            if current and current['end_time'] - current['start_time'] >= min_duration:
+                                merged.append(current)
+                        
+                        # Sort by humor score and limit to top 30
+                        try:
+                            merged.sort(key=lambda x: x.get('humor_score', 0), reverse=True)
+                            final_clips = merged[:30]
+                        except Exception as e:
+                            logger.error(f"Error sorting clips: {str(e)}")
+                            final_clips = merged  # Use unsorted clips if sorting fails
+                        
+                        logger.info(f"Final number of clips after merging: {len(final_clips)}")
+                    except Exception as e:
+                        logger.error(f"Error in clip merging process: {str(e)}")
+                        final_clips = funny_clips[:30]  # Use unmerged clips if merging fails
+                else:
+                    final_clips = []
+                    logger.info("No funny clips found")
+            except Exception as e:
+                logger.error(f"Error in clip processing: {str(e)}")
+                final_clips = []  # Fallback to empty clips list if all processing fails
+
+            logger.info("\n=== Analysis complete ===")
+            analysis_state['clips'] = final_clips
+            analysis_state['in_progress'] = False
+            analysis_state['error'] = None
+
+            return {
+                "chunk_start": chunk_start,
+                "chunk_duration": chunk_duration,
+                "clips": final_clips
+            }
+
+        except Exception as e:
+            logger.error(f"Error in background analysis: {str(e)}")
+            analysis_state['error'] = str(e)
+            analysis_state['in_progress'] = False
+            raise
+
+        finally:
+            try:
+                os.unlink(temp_audio_path)
+                logger.info(f"Cleaned up temporary file: {temp_audio_path}")
+            except:
+                pass
 
     except Exception as e:
-        logger.error(f"Error processing audio chunk: {e}", exc_info=True)
-        # Clean up chunk file if it exists
-        if 'chunk_path' in locals() and chunk_path.exists():
-            try:
-                os.remove(chunk_path)
-                logger.debug(f"Cleaned up chunk file after error: {chunk_path}")
-            except Exception as cleanup_error:
-                logger.warning(f"Failed to clean up chunk file: {cleanup_error}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
+        logger.error(f"Error in /process-audio-chunk: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+##########################
+# Heartbeat
+##########################
 
 @app.post("/heartbeat")
 async def heartbeat():
-    """Endpoint to handle client heartbeat requests"""
+    """Simple heartbeat to keep the server awake."""
     logger.debug(f"Received heartbeat at {datetime.utcnow().isoformat()}")
     return {"status": "alive", "timestamp": datetime.utcnow().isoformat()}
 
+
+##########################
+# Run with Uvicorn
+##########################
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
