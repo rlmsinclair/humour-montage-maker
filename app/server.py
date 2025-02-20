@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import aiofiles
 import os
 from pathlib import Path
@@ -30,6 +31,15 @@ openai_client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 gemini_client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 
 app = FastAPI()
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 # Default prompt template
 DEFAULT_PROMPT = """You are a humor analysis system. Analyze these segments of a transcribed video which may have multiple speakers for humorous content and rate them:
