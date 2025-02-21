@@ -80,7 +80,7 @@ app = FastAPI()
 async def startup_event():
     """Verify ffmpeg installation on startup"""
     ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
-    logger.info(f"Checking ffmpeg installation at startup (path: {ffmpeg_path})")
+    logger.info(f"Checking ffmpeg installation at startup")
     
     try:
         # Try to run ffmpeg -version
@@ -89,15 +89,10 @@ async def startup_event():
                               text=True, 
                               check=True)
         logger.info(f"ffmpeg check successful: {result.stdout.splitlines()[0]}")
-    except FileNotFoundError:
-        logger.critical(f"STARTUP ERROR: ffmpeg not found at {ffmpeg_path}")
-        logger.critical("Please ensure ffmpeg is installed and FFMPEG_PATH is correct")
-        # Don't raise here - let the application start but log the error
-    except subprocess.CalledProcessError as e:
-        logger.critical(f"STARTUP ERROR: ffmpeg check failed: {e.stderr}")
-        logger.critical("Please check ffmpeg installation")
     except Exception as e:
-        logger.critical(f"STARTUP ERROR: Unexpected error checking ffmpeg: {str(e)}")
+        logger.critical(f"STARTUP ERROR: ffmpeg check failed: {str(e)}")
+        logger.critical("Please ensure ffmpeg is installed and available in PATH")
+        # Don't raise here - let the application start but log the error
 
 # Configure CORS
 app.add_middleware(
