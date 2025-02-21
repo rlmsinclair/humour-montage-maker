@@ -588,17 +588,17 @@ async def process_audio_chunk(
                     current_end = min(current_start + chunk_duration, chunk_duration)
                     audio_path = f"temp_{uuid.uuid4()}_{int(current_start)}.mp3"
                     
-            # Get ffmpeg path
-            ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
-            logger.info(f"Using ffmpeg path: {ffmpeg_path}")
-            
-            # Check if ffmpeg exists
-            try:
-                subprocess.run([ffmpeg_path, "-version"], capture_output=True, check=True)
-                logger.info("ffmpeg is available and working")
-            except Exception as e:
-                logger.error(f"Error checking ffmpeg: {str(e)}")
-                raise HTTPException(status_code=500, detail="ffmpeg is not available")
+                    # Get ffmpeg path
+                    ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
+                    logger.info(f"Using ffmpeg path: {ffmpeg_path}")
+                    
+                    # Check if ffmpeg exists
+                    try:
+                        subprocess.run([ffmpeg_path, "-version"], capture_output=True, check=True)
+                        logger.info("ffmpeg is available and working")
+                    except Exception as e:
+                        logger.error(f"Error checking ffmpeg: {str(e)}")
+                        raise HTTPException(status_code=500, detail="ffmpeg is not available")
 
                     ffmpeg_cmd = [
                         ffmpeg_path, "-y",  # Add -y flag to overwrite output files
