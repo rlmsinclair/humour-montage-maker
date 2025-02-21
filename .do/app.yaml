@@ -15,7 +15,7 @@ services:
         type: SECRET
       - key: FFMPEG_PATH
         scope: RUN_TIME
-        value: /usr/bin/ffmpeg
+        value: ffmpeg
     instance_count: 1
     instance_size_slug: basic-xxs
     http_port: 8080
