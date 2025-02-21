@@ -565,9 +565,32 @@ async def process_audio_chunk(
                     current_end = min(current_start + chunk_duration, chunk_duration)
                     audio_path = f"temp_{uuid.uuid4()}_{int(current_start)}.mp3"
                     
+                    # Get ffmpeg path and verify it exists
                     ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
+                    logger.info(f"Using ffmpeg path: {ffmpeg_path}")
+                    
+                    # Check if ffmpeg exists
+                    try:
+                        subprocess.run([ffmpeg_path, "-version"], capture_output=True, check=True)
+                        logger.info("ffmpeg is available and working")
+                    except subprocess.CalledProcessError as e:
+                        logger.error(f"ffmpeg check failed with error: {e.stderr}")
+                        raise
+                    except FileNotFoundError:
+                        logger.error(f"ffmpeg not found at path: {ffmpeg_path}")
+                        # Try to find ffmpeg in common locations
+                        common_paths = ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/opt/homebrew/bin/ffmpeg']
+                        for path in common_paths:
+                            if os.path.exists(path):
+                                logger.info(f"Found ffmpeg at alternate location: {path}")
+                                ffmpeg_path = path
+                                break
+                        else:
+                            logger.error("Could not find ffmpeg in any common location")
+                            raise FileNotFoundError(f"ffmpeg not found in PATH or common locations")
+
                     ffmpeg_cmd = [
-                        ffmpeg_path, "-y",
+                        ffmpeg_path, "-y",  # Add -y flag to overwrite output files
                         "-i", str(temp_audio_path),
                         "-ss", str(current_start),
                         "-to", str(current_end),
