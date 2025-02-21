@@ -23,4 +23,6 @@ services:
       - path: /
     health_check:
       http_path: /heartbeat
-    build_command: apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt
+    build_command: pip install -r requirements.txt
+    packages:
+      - ffmpeg
