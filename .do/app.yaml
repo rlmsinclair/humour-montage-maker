@@ -2,7 +2,7 @@ name: udder-app
 services:
   - name: api
     github:
-      branch: main
+      branch: master
       deploy_on_push: true
       repo: rlmsinclair/udder-app
     source_dir: /
