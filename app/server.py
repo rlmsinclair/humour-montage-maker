@@ -420,8 +420,9 @@ async def process_video_whole(
                 audio_path = f"temp_{file_id}_{int(current_start)}.mp3"
                 logger.info(f"Processing chunk {int(current_start/chunk_duration) + 1}: {current_start:.1f}s to {current_end:.1f}s => {audio_path}")
                 
+                ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
                 ffmpeg_cmd = [
-                    "ffmpeg", "-y",
+                    ffmpeg_path, "-y",
                     "-i", temp_video_path,
                     "-ss", str(current_start),
                     "-to", str(current_end),
@@ -564,8 +565,9 @@ async def process_audio_chunk(
                     current_end = min(current_start + chunk_duration, chunk_duration)
                     audio_path = f"temp_{uuid.uuid4()}_{int(current_start)}.mp3"
                     
+                    ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
                     ffmpeg_cmd = [
-                        "ffmpeg", "-y",
+                        ffmpeg_path, "-y",
                         "-i", str(temp_audio_path),
                         "-ss", str(current_start),
                         "-to", str(current_end),
@@ -819,8 +821,9 @@ async def create_montage_parallel(video_path: Path, segments: List[Dict], output
             logger.info(f"Creating clip {idx} from {start_time:.2f}s to {end_time:.2f}s")
             
             # Try fast copy first
+            ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
             cmd = [
-                'ffmpeg',
+                ffmpeg_path,
                 '-ss', str(start_time),  # Seek before input
                 '-t', str(duration),
                 '-i', str(video_path),
@@ -834,7 +837,7 @@ async def create_montage_parallel(video_path: Path, segments: List[Dict], output
             if not success or not clip_path.exists() or os.path.getsize(clip_path) == 0:
                 logger.info(f"Fast copy failed for clip {idx}, falling back to re-encode")
                 cmd = [
-                    'ffmpeg',
+                    ffmpeg_path,
                     '-ss', str(start_time),  # Seek before input
                     '-t', str(duration),
                     '-i', str(video_path),
@@ -865,7 +868,7 @@ async def create_montage_parallel(video_path: Path, segments: List[Dict], output
 
         # Merge clips
         cmd = [
-            'ffmpeg', '-f', 'concat',
+            ffmpeg_path, '-f', 'concat',
             '-safe', '0',
             '-i', str(concat_file),
             '-c', 'copy',
