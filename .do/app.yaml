@@ -1,49 +1,26 @@
-name: udder
+name: udder-app
 services:
   - name: api
-    git:
-      branch: master
-      repo_clone_url: ${REPO_URL}
-    buildpacks:
-      - name: digitalocean/custom
-      - name: heroku/python
-    build_command: |
-      apt-get update
-      apt-get install -y ffmpeg libavcodec-extra libavformat-dev libavutil-dev
-      pip install -r requirements.txt
-      # Ensure ffmpeg persists to runtime
-      mkdir -p /workspace/.apt/usr/bin
-      cp /usr/bin/ffmpeg /workspace/.apt/usr/bin/
-      cp /usr/bin/ffprobe /workspace/.apt/usr/bin/
-    run_command: uvicorn app:app --host 0.0.0.0 --port $PORT
+    github:
+      branch: main
+      deploy_on_push: true
+      repo: rlmsinclair/udder-app
+    source_dir: /
+    dockerfile_path: Dockerfile
     envs:
       - key: OPENAI_API_KEY
         scope: RUN_TIME
-        value: ${OPENAI_API_KEY}
-      - key: GEMINI_API_KEY
+        type: SECRET
+      - key: FFMPEG_PATH
         scope: RUN_TIME
-        value: ${GEMINI_API_KEY}
+        value: /usr/bin/ffmpeg
     instance_count: 1
     instance_size_slug: basic-xxs
+    http_port: 8000
     routes:
       - path: /
-    http_port: 8080
-    cors:
-      allow_origins:
-        - "*"
-      allow_methods:
-        - "GET"
-        - "POST"
-        - "PUT"
-        - "DELETE"
-        - "OPTIONS"
-      allow_headers:
-        - "*"
-    https_only: true
-    tls_settings:
-      minimum_version: "1.2"
-      ciphers:
-        - "ECDHE-ECDSA-AES128-GCM-SHA256"
-        - "ECDHE-RSA-AES128-GCM-SHA256"
-        - "ECDHE-ECDSA-AES256-GCM-SHA384"
-        - "ECDHE-RSA-AES256-GCM-SHA384"
+    health_check:
+      http_path: /heartbeat
+    run_command: python server.py
+    packages:
+      - ffmpeg
