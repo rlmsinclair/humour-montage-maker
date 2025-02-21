@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, FileResponse
 from pathlib import Path
 import shutil
@@ -492,22 +492,19 @@ async def process_video_whole(
 
             start = current_start
 
-        # Return all discovered clips
+        # Return all discovered clips and the file_id for montage creation
         logger.info(f"Video processing complete. Found {len(all_clips)} total clips.")
         logger.info("-------- End of video processing --------")
-        return {"clips": all_clips}
+        return {"clips": all_clips, "file_id": file_id}
 
     except Exception as e:
         logger.error(f"Error in /process-video-whole: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
     finally:
-        # Remove the temporary video
-        try:
-            if os.path.exists(temp_video_path):
-                os.remove(temp_video_path)
-        except Exception as cleanup_err:
-            logger.warning(f"Error removing temp video: {cleanup_err}")
+        # Keep the temporary video file for montage creation
+        # It will be cleaned up after montage is downloaded or after a timeout
+        pass
 
 
 ##############################################
@@ -521,9 +518,11 @@ async def process_audio_chunk(
     chunk_start: float = Form(...),
     chunk_duration: float = Form(...),
     custom_prompt: str = Form(None),
+    is_short_video: bool = Form(False),
 ):
     """
     Process an audio chunk and analyze it for humor.
+    For short videos, only return timestamps without creating montage.
     """
     global analysis_state
     try:
@@ -550,26 +549,113 @@ async def process_audio_chunk(
             # Update activity timestamp
             analysis_state['last_activity'] = time.time()
 
-            # Transcribe audio using OpenAI Whisper in batch
-            words = await transcribe_chunks_batch([(temp_audio_path, chunk_start)])
-            logger.info(f"Transcription complete: {len(words)} words found")
+            if is_short_video:
+                # Process exactly like process-video-whole for short videos
+                chunk_duration = 120  # 2 minutes
+                overlap = 0
+                start = 0.0
+                step = chunk_duration - overlap
+                all_clips = []
+                current_start = start
+                
+                # Collect audio chunks for batch processing (up to 50 at a time)
+                audio_chunks = []
+                while current_start < chunk_duration and len(audio_chunks) < 50:
+                    current_end = min(current_start + chunk_duration, chunk_duration)
+                    audio_path = f"temp_{uuid.uuid4()}_{int(current_start)}.mp3"
+                    
+                    ffmpeg_cmd = [
+                        "ffmpeg", "-y",
+                        "-i", str(temp_audio_path),
+                        "-ss", str(current_start),
+                        "-to", str(current_end),
+                        "-vn",
+                        "-acodec", "mp3",
+                        audio_path
+                    ]
+                    try:
+                        logger.debug(f"Running FFmpeg command: {' '.join(ffmpeg_cmd)}")
+                        process = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
+                        logger.debug("FFmpeg chunk extraction completed successfully")
+                        audio_chunks.append((Path(audio_path), current_start))
+                    except subprocess.CalledProcessError as e:
+                        logger.error(f"FFmpeg error chunk [{current_start}-{current_end}]: {e.stderr}")
+                        break
+                    
+                    current_start += step
 
-            # Group words into segments
-            segments = group_words_into_segments(words)
-            logger.info(f"Created {len(segments)} segments")
+                # Transcribe audio chunks in batches
+                logger.info(f"Starting batch transcription for {len(audio_chunks)} chunks")
+                words = await transcribe_chunks_batch(audio_chunks)
+                logger.info(f"Batch transcription complete: {len(words)} words found")
 
-            # Update activity timestamp
-            analysis_state['last_activity'] = time.time()
+                # Group words into segments for batch analysis
+                segments = []
+                current_segment_start = start
+                current_segment_words = []
+                
+                for word in words:
+                    if word['end'] - current_segment_start > chunk_duration:
+                        if current_segment_words:
+                            segment_text = " ".join(w["text"] for w in current_segment_words)
+                            segments.append({
+                                "start_time": current_segment_start,
+                                "end_time": current_segment_words[-1]['end'],
+                                "words": current_segment_words,
+                                "text": segment_text
+                            })
+                        current_segment_start = word['start']
+                        current_segment_words = [word]
+                    else:
+                        current_segment_words.append(word)
+                
+                if current_segment_words:
+                    segment_text = " ".join(w["text"] for w in current_segment_words)
+                    segments.append({
+                        "start_time": current_segment_start,
+                        "end_time": current_segment_words[-1]['end'],
+                        "words": current_segment_words,
+                        "text": segment_text
+                    })
 
-            # Analyze segments for humor
-            analyzed_segments = await analyze_humor_segments(segments, custom_prompt)
+                # Analyze segments in batches
+                logger.info(f"Starting batch humor analysis for {len(segments)} segments")
+                analyzed_segments = await analyze_humor_segments(segments, custom_prompt)
+                logger.info(f"Batch humor analysis complete")
+                
+                # Process results
+                funny_clips = []
+                for seg in analyzed_segments:
+                    if seg.get("humor_score", 0) >= 40:
+                        funny_clips.extend(seg.get("funny_clips", []))
 
-            logger.info("\n=== Processing final clips ===")
-            # Filter and merge funny clips
-            funny_clips = []
-            for segment in analyzed_segments:
-                if segment['humor_score'] >= 40:
-                    funny_clips.extend(segment['funny_clips'])
+                # Cleanup chunk audio files
+                for audio_path, _ in audio_chunks:
+                    if os.path.exists(audio_path):
+                        logger.debug(f"Cleaning up temporary audio file: {audio_path}")
+                        os.remove(audio_path)
+
+            else:
+                # Original processing for longer videos
+                words = await transcribe_chunks_batch([(temp_audio_path, chunk_start)])
+                logger.info(f"Transcription complete: {len(words)} words found")
+
+                # Group words into segments
+                segments = group_words_into_segments(words)
+                logger.info(f"Created {len(segments)} segments")
+
+                # Update activity timestamp
+                analysis_state['last_activity'] = time.time()
+
+                # Analyze segments for humor
+                analyzed_segments = await analyze_humor_segments(segments, custom_prompt)
+
+                logger.info("\n=== Processing final clips ===")
+                # Filter and merge funny clips
+                funny_clips = []
+                for segment in analyzed_segments:
+                    if segment['humor_score'] >= 40:
+                        funny_clips.extend(segment['funny_clips'])
 
             logger.info(f"Found {len(funny_clips)} total funny clips")
 
@@ -635,7 +721,8 @@ async def process_audio_chunk(
             return {
                 "chunk_start": chunk_start,
                 "chunk_duration": chunk_duration,
-                "clips": final_clips
+                "clips": final_clips,
+                "client_side_montage": is_short_video
             }
 
         except Exception as e:
@@ -810,26 +897,37 @@ async def create_montage_parallel(video_path: Path, segments: List[Dict], output
 
 @app.post("/create-montage")
 async def create_montage_endpoint(
-    file: UploadFile = File(...),
     segments: str = Form(...),
+    file: UploadFile = File(None),
+    file_id: str = Form(None),
     background_tasks: BackgroundTasks = None
 ):
-    """Create a montage from the selected segments."""
+    """Create a montage from the selected segments using either a new upload or existing video."""
     try:
         # Parse segments JSON
         segments_data = json.loads(segments)
         if not segments_data:
             raise HTTPException(status_code=400, detail="No segments provided")
 
-        # Generate unique ID for this montage
-        file_id = str(uuid.uuid4())
-        temp_video_path = f"temp_{file_id}.mp4"
-        output_path = f"temp_{file_id}_montage.mp4"
+        # If no file_id provided, handle new upload
+        if not file_id:
+            if not file:
+                raise HTTPException(status_code=400, detail="Either file or file_id must be provided")
+            
+            file_id = str(uuid.uuid4())
+            temp_video_path = f"temp_{file_id}.mp4"
+            
+            # Save uploaded video
+            async with aiofiles.open(temp_video_path, 'wb') as out_file:
+                content = await file.read()
+                await out_file.write(content)
+        else:
+            # Use existing video file
+            temp_video_path = f"temp_{file_id}.mp4"
+            if not os.path.exists(temp_video_path):
+                raise HTTPException(status_code=404, detail="Original video file not found")
 
-        # Save uploaded video
-        async with aiofiles.open(temp_video_path, 'wb') as out_file:
-            content = await file.read()
-            await out_file.write(content)
+        output_path = f"temp_{file_id}_montage.mp4"
 
         # Create montage using the provided function
         success = await create_montage_parallel(Path(temp_video_path), segments_data, Path(output_path))
@@ -855,19 +953,56 @@ async def create_montage_endpoint(
 # Download Montage
 ##########################
 
+from fastapi.responses import StreamingResponse
+from starlette.responses import Response
+import mimetypes
+import stat
+
 @app.get("/download-montage/{file_id}")
-async def download_montage(file_id: str):
-    """Download the generated montage file."""
+async def download_montage(file_id: str, background_tasks: BackgroundTasks, download: bool = False, request: Request = None):
+    """
+    Stream or download the montage file.
+    If download=True, schedule cleanup after 24 hours.
+    """
     try:
         output_path = Path(f"temp_{file_id}_montage.mp4")
+        original_video = Path(f"temp_{file_id}.mp4")
+        
         if not output_path.exists():
             raise HTTPException(status_code=404, detail="Montage file not found")
+
+        # Get file size
+        stat_result = os.stat(output_path)
+        file_size = stat_result.st_size
+
+        # Only schedule cleanup if this is a download request
+        if download:
+            async def cleanup_files():
+                await asyncio.sleep(24 * 60 * 60)  # Wait 24 hours
+                for path in [output_path, original_video]:
+                    try:
+                        if path.exists():
+                            path.unlink()
+                            logger.info(f"Cleaned up temporary file: {path}")
+                    except Exception as e:
+                        logger.warning(f"Error cleaning up {path}: {e}")
+                        
+            background_tasks.add_task(cleanup_files)
             
-        return FileResponse(
-            path=output_path,
-            filename=f"montage_{file_id}.mp4",
-            media_type="video/mp4"
-        )
+            return FileResponse(
+                path=output_path,
+                filename=f"montage_{file_id}.mp4",
+                media_type="video/mp4",
+                content_disposition_type="attachment"
+            )
+        else:
+            # For streaming, return the file with inline content disposition
+            return FileResponse(
+                path=output_path,
+                media_type="video/mp4",
+                content_disposition_type="inline",
+                filename=f"montage_{file_id}.mp4"
+            )
     except Exception as e:
         logger.error(f"Error serving montage file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
