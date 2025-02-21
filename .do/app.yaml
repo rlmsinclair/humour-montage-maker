@@ -23,8 +23,6 @@ services:
       - path: /
     health_check:
       http_path: /heartbeat
-    build_command: pip install -r requirements.txt
-    packages:
-      - ffmpeg
-      - python3-dev
-      - build-essential
+    build_command: |
+      apt-get update && apt-get install -y ffmpeg python3-dev build-essential
+      pip install -r requirements.txt
