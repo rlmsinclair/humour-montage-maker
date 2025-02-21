@@ -79,18 +79,33 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_event():
     """Verify ffmpeg installation on startup"""
-    ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
-    logger.info(f"Checking ffmpeg installation at startup")
+    # Common locations for ffmpeg
+    possible_paths = [
+        os.getenv('FFMPEG_PATH', 'ffmpeg'),  # First try env var or 'ffmpeg'
+        'ffmpeg',                            # Try PATH
+        '/usr/bin/ffmpeg',                   # Common Linux location
+        '/usr/local/bin/ffmpeg'              # Another common location
+    ]
     
-    try:
-        # Try to run ffmpeg -version
-        result = subprocess.run([ffmpeg_path, "-version"], 
-                              capture_output=True, 
-                              text=True, 
-                              check=True)
-        logger.info(f"ffmpeg check successful: {result.stdout.splitlines()[0]}")
-    except Exception as e:
-        logger.critical(f"STARTUP ERROR: ffmpeg check failed: {str(e)}")
+    ffmpeg_found = False
+    for path in possible_paths:
+        try:
+            logger.info(f"Checking ffmpeg at: {path}")
+            result = subprocess.run([path, "-version"],
+                                  capture_output=True,
+                                  text=True,
+                                  check=True)
+            logger.info(f"ffmpeg check successful: {result.stdout.splitlines()[0]}")
+            # Update environment variable to use this working path
+            os.environ['FFMPEG_PATH'] = path
+            ffmpeg_found = True
+            break
+        except Exception as e:
+            logger.warning(f"ffmpeg not found at {path}: {str(e)}")
+            continue
+    
+    if not ffmpeg_found:
+        logger.critical("STARTUP ERROR: ffmpeg not found in any standard location")
         logger.critical("Please ensure ffmpeg is installed and available in PATH")
         # Don't raise here - let the application start but log the error
 
