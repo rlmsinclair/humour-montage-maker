@@ -10,6 +10,9 @@ services:
       - key: OPENAI_API_KEY
         scope: RUN_TIME
         type: SECRET
+      - key: GEMINI_API_KEY
+        scope: RUN_TIME
+        type: SECRET
       - key: FFMPEG_PATH
         scope: RUN_TIME
         value: /usr/bin/ffmpeg
@@ -20,6 +23,5 @@ services:
       - path: /
     health_check:
       http_path: /heartbeat
-    build_command: pip install -r requirements.txt
-    packages:
-      - ffmpeg
+    build_command: apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt
+    http_port: 8080
