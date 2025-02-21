@@ -18,10 +18,9 @@ services:
         value: /usr/bin/ffmpeg
     instance_count: 1
     instance_size_slug: basic-xxs
-    http_port: 8000
+    http_port: 8080
     routes:
       - path: /
     health_check:
       http_path: /heartbeat
     build_command: apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt
-    http_port: 8080
