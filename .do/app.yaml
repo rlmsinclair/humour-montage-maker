@@ -6,7 +6,6 @@ services:
       deploy_on_push: true
       repo: rlmsinclair/udder-app
     source_dir: /
-    dockerfile_path: Dockerfile
     envs:
       - key: OPENAI_API_KEY
         scope: RUN_TIME
@@ -21,6 +20,7 @@ services:
       - path: /
     health_check:
       http_path: /heartbeat
-    run_command: python server.py
+    build_command: pip install -r requirements.txt
+    run_command: python -m uvicorn app.server:app --host 0.0.0.0 --port 8000
     packages:
       - ffmpeg
