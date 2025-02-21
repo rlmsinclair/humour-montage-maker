@@ -432,7 +432,7 @@ async def process_video_whole(
                 ]
                 try:
                     logger.debug(f"Running FFmpeg command: {' '.join(ffmpeg_cmd)}")
-                    process = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
+                    process = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True, env=os.environ)
                     logger.debug("FFmpeg chunk extraction completed successfully")
                     audio_chunks.append((Path(audio_path), current_start))
                 except subprocess.CalledProcessError as e:
@@ -577,7 +577,7 @@ async def process_audio_chunk(
                     ]
                     try:
                         logger.debug(f"Running FFmpeg command: {' '.join(ffmpeg_cmd)}")
-                        process = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
+                        process = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True, env=os.environ)
                         logger.debug("FFmpeg chunk extraction completed successfully")
                         audio_chunks.append((Path(audio_path), current_start))
                     except subprocess.CalledProcessError as e:
