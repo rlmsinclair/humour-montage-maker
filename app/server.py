@@ -15,7 +15,7 @@ import subprocess
 import uuid
 import time
 
-import httpx
+from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
@@ -63,10 +63,13 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Initialize API clients
-# Transcription runs on xAI (Grok) Speech-to-Text — custom /v1/stt endpoint,
-# ~3.6x cheaper than OpenAI Whisper, returns word-level timestamps by default.
-XAI_API_KEY = os.getenv('XAI_API_KEY')
-XAI_STT_URL = "https://api.x.ai/v1/stt"
+# Transcription runs on Groq (OpenAI-SDK compatible, ~9x cheaper than OpenAI
+# Whisper) — same audio.transcriptions.create interface, just repointed.
+transcription_client = AsyncOpenAI(
+    api_key=os.getenv('GROQ_API_KEY'),
+    base_url="https://api.groq.com/openai/v1",
+)
+TRANSCRIPTION_MODEL = os.getenv('TRANSCRIPTION_MODEL', 'whisper-large-v3-turbo')
 
 anthropic_client = AsyncAnthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 
@@ -169,7 +172,7 @@ def group_words_into_segments(words: List[Dict], max_segment_duration: float = 3
 
 async def transcribe_chunks_batch(audio_paths: List[tuple[Path, float]], batch_size: int = 50) -> List[Dict]:
     """
-    Transcribe multiple audio chunks concurrently using xAI (Grok) Speech-to-Text.
+    Transcribe multiple audio chunks concurrently using Groq Whisper.
     Each audio_path tuple contains (path, offset)
     Returns a list of word-level info for all chunks.
     """
@@ -182,18 +185,15 @@ async def transcribe_chunks_batch(audio_paths: List[tuple[Path, float]], batch_s
             try:
                 logger.debug(f"Transcribing audio: {audio_path} (attempt {attempt + 1}/{MAX_RETRIES})")
                 
-                logger.info("Sending request to xAI (Grok) Speech-to-Text API...")
-                async with httpx.AsyncClient(timeout=300.0) as http:
-                    with open(audio_path, "rb") as audio:
-                        stt_resp = await http.post(
-                            XAI_STT_URL,
-                            headers={"Authorization": f"Bearer {XAI_API_KEY}"},
-                            files={"file": (audio_path.name, audio, "audio/mpeg")},
-                            data={"language": "en"},
-                        )
-                    stt_resp.raise_for_status()
-                    transcript_response = stt_resp.json()
-                logger.info("Successfully received xAI STT response")
+                logger.info("Sending request to Groq Whisper API...")
+                with open(audio_path, "rb") as audio:
+                    transcript_response = await transcription_client.audio.transcriptions.create(
+                        file=audio,
+                        model=TRANSCRIPTION_MODEL,
+                        response_format="verbose_json",
+                        timestamp_granularities=["word"]
+                    )
+                logger.info("Successfully received Groq Whisper response")
             
                 # Extract words with timestamps
                 logger.debug("Processing transcript response...")
