@@ -15,7 +15,7 @@ import subprocess
 import uuid
 import time
 
-from openai import AsyncOpenAI
+import httpx
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
@@ -63,7 +63,11 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Initialize API clients
-openai_client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+# Transcription runs on xAI (Grok) Speech-to-Text — custom /v1/stt endpoint,
+# ~3.6x cheaper than OpenAI Whisper, returns word-level timestamps by default.
+XAI_API_KEY = os.getenv('XAI_API_KEY')
+XAI_STT_URL = "https://api.x.ai/v1/stt"
+
 anthropic_client = AsyncAnthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 
 # Model used for humor analysis
@@ -165,7 +169,7 @@ def group_words_into_segments(words: List[Dict], max_segment_duration: float = 3
 
 async def transcribe_chunks_batch(audio_paths: List[tuple[Path, float]], batch_size: int = 50) -> List[Dict]:
     """
-    Transcribe multiple audio chunks concurrently using OpenAI Whisper API.
+    Transcribe multiple audio chunks concurrently using xAI (Grok) Speech-to-Text.
     Each audio_path tuple contains (path, offset)
     Returns a list of word-level info for all chunks.
     """
@@ -178,15 +182,18 @@ async def transcribe_chunks_batch(audio_paths: List[tuple[Path, float]], batch_s
             try:
                 logger.debug(f"Transcribing audio: {audio_path} (attempt {attempt + 1}/{MAX_RETRIES})")
                 
-                logger.info("Sending request to OpenAI Whisper API...")
-                with open(audio_path, "rb") as audio:
-                    transcript_response = await openai_client.audio.transcriptions.create(
-                        file=audio,
-                        model="whisper-1",
-                        response_format="verbose_json",
-                        timestamp_granularities=["word"]
-                    )
-                logger.info("Successfully received Whisper response")
+                logger.info("Sending request to xAI (Grok) Speech-to-Text API...")
+                async with httpx.AsyncClient(timeout=300.0) as http:
+                    with open(audio_path, "rb") as audio:
+                        stt_resp = await http.post(
+                            XAI_STT_URL,
+                            headers={"Authorization": f"Bearer {XAI_API_KEY}"},
+                            files={"file": (audio_path.name, audio, "audio/mpeg")},
+                            data={"language": "en"},
+                        )
+                    stt_resp.raise_for_status()
+                    transcript_response = stt_resp.json()
+                logger.info("Successfully received xAI STT response")
             
                 # Extract words with timestamps
                 logger.debug("Processing transcript response...")

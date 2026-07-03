@@ -7,7 +7,7 @@ services:
       repo: rlmsinclair/udder-app
     source_dir: /
     envs:
-      - key: OPENAI_API_KEY
+      - key: XAI_API_KEY
         scope: RUN_TIME
         type: SECRET
       - key: ANTHROPIC_API_KEY
