@@ -859,79 +859,63 @@ async def create_montage_parallel(video_path: Path, segments: List[Dict], output
     """Create a montage from video segments in parallel."""
     temp_dir = None
     try:
-        temp_dir = Path('temp_clips')
-        temp_dir.mkdir(exist_ok=True)
-        logger.info(f"Created temp directory at {temp_dir}")
+        ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
 
-        successful_clips = []
-        for idx, segment in enumerate(segments):
-            clip_path = temp_dir / f"clip_{idx:03d}.mp4"
-            # Add 0.5 seconds padding on both sides
-            start_time = max(0, segment['start_time'] - 0.5)
-            end_time = segment['end_time'] + 0.5
-            duration = end_time - start_time
-            
-            logger.info(f"Creating clip {idx} from {start_time:.2f}s to {end_time:.2f}s")
-            
-            # Try fast copy first
-            ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
-            cmd = [
-                ffmpeg_path,
-                '-ss', str(start_time),  # Seek before input
-                '-t', str(duration),
-                '-i', str(video_path),
-                '-c', 'copy',  # Copy both video and audio streams
-                str(clip_path),
-                '-y'
-            ]
-            success, error = await FFmpegHelper.run_command(cmd)
+        # Build a single filter_complex that trims each segment on exact frame
+        # boundaries, resets its timestamps, and concatenates them. Doing the
+        # whole montage in one decode/encode pass keeps audio and video locked
+        # together — no keyframe snapping (which stream-copy causes) and no
+        # cumulative A/V drift across clips.
+        filter_parts = []
+        concat_inputs = []
+        n = 0
+        for segment in segments:
+            # 0.5s padding on each side, clamped to a valid range
+            start_time = max(0.0, float(segment['start_time']) - 0.5)
+            end_time = float(segment['end_time']) + 0.5
+            if end_time <= start_time:
+                logger.warning(f"Skipping segment with non-positive duration: {segment}")
+                continue
 
-            # If copy fails, fallback to re-encode
-            if not success or not clip_path.exists() or os.path.getsize(clip_path) == 0:
-                logger.info(f"Fast copy failed for clip {idx}, falling back to re-encode")
-                cmd = [
-                    ffmpeg_path,
-                    '-ss', str(start_time),  # Seek before input
-                    '-t', str(duration),
-                    '-i', str(video_path),
-                    '-c:v', 'libx264', '-preset', 'veryfast',  # Faster preset
-                    '-c:a', 'aac',
-                    str(clip_path),
-                    '-y'
-                ]
-                success, error = await FFmpegHelper.run_command(cmd)
+            filter_parts.append(
+                f"[0:v]trim=start={start_time:.3f}:end={end_time:.3f},"
+                f"setpts=PTS-STARTPTS[v{n}];"
+            )
+            filter_parts.append(
+                f"[0:a]atrim=start={start_time:.3f}:end={end_time:.3f},"
+                f"asetpts=PTS-STARTPTS[a{n}];"
+            )
+            concat_inputs.append(f"[v{n}][a{n}]")
+            logger.info(f"Segment {n}: {start_time:.2f}s -> {end_time:.2f}s")
+            n += 1
 
-            if success and clip_path.exists() and clip_path.stat().st_size > 0:
-                logger.info(f"Successfully created clip {idx}")
-                successful_clips.append(clip_path)
-            else:
-                logger.error(f"Failed to create clip {idx}: {error}")
-
-        if not successful_clips:
-            logger.error("No clips were created successfully")
+        if n == 0:
+            logger.error("No valid segments to build a montage from")
             return False
 
-        # Create concat file
-        concat_file = temp_dir / 'concat.txt'
-        async with aiofiles.open(concat_file, 'w') as f:
-            for clip_path in successful_clips:
-                await f.write(f"file '{clip_path.absolute()}'\n")
+        filter_complex = (
+            "".join(filter_parts)
+            + "".join(concat_inputs)
+            + f"concat=n={n}:v=1:a=1[outv][outa]"
+        )
 
-        logger.info("Created concat file, merging clips...")
-
-        # Merge clips
+        logger.info(f"Building montage from {n} segment(s) in a single pass...")
         cmd = [
-            ffmpeg_path, '-f', 'concat',
-            '-safe', '0',
-            '-i', str(concat_file),
-            '-c', 'copy',
+            ffmpeg_path,
+            '-i', str(video_path),
+            '-filter_complex', filter_complex,
+            '-map', '[outv]', '-map', '[outa]',
+            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
+            '-movflags', '+faststart',
             str(output_path),
             '-y'
         ]
         success, error = await FFmpegHelper.run_command(cmd)
 
         if not success:
-            logger.error(f"Failed to merge clips: {error}")
+            logger.error(f"Failed to build montage: {error}")
             return False
 
         if not output_path.exists() or output_path.stat().st_size == 0:
