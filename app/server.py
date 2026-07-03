@@ -16,7 +16,7 @@ import uuid
 import time
 
 from openai import AsyncOpenAI
-from google import genai
+from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
 import logging.handlers
@@ -64,7 +64,10 @@ load_dotenv()
 
 # Initialize API clients
 openai_client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-gemini_client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
+anthropic_client = AsyncAnthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+
+# Model used for humor analysis
+HUMOR_MODEL = "claude-sonnet-5"
 
 # Global state for analysis
 analysis_state = {
@@ -105,6 +108,16 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
+
+# Serve the simple web frontend
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+@app.get("/")
+async def frontend():
+    """Serve the single-page web UI."""
+    return FileResponse(STATIC_DIR / "index.html")
+
 
 # A default prompt if none provided
 DEFAULT_PROMPT = """You are a humor analysis system. Analyze these segments... {segments_text} ..."""
@@ -247,7 +260,7 @@ async def transcribe_chunks_batch(audio_paths: List[tuple[Path, float]], batch_s
 
 async def analyze_humor_segments(segments: List[Dict], custom_prompt: str = None, batch_size: int = 50) -> List[Dict]:
     """
-    Analyze segments for humor using Gemini in batches.
+    Analyze segments for humor using Claude in batches.
     """
     if not segments:
         return []
@@ -286,18 +299,26 @@ Consider elements like:
 Only include genuinely funny moments. If nothing is funny, return an empty funny_moments array.
 Ensure the "text" field matches words exactly as they appear in the original text."""
 
-            logger.info("Sending request to Gemini...")
+            logger.info("Sending request to Claude...")
             try:
-                response = await asyncio.to_thread(
-                    lambda: gemini_client.models.generate_content(
-                        model="gemini-2.0-flash",
-                        contents=prompt
-                    )
+                # Thinking disabled: this is a high-volume, per-segment extraction
+                # run 50-concurrent, so we optimize for throughput/cost. Sonnet 5
+                # runs adaptive thinking by default when the field is omitted.
+                response = await anthropic_client.messages.create(
+                    model=HUMOR_MODEL,
+                    max_tokens=2048,
+                    thinking={"type": "disabled"},
+                    system=(
+                        "You are a humor analysis system. Respond with ONLY the "
+                        "JSON object requested — no preamble, no code fences, no "
+                        "commentary before or after."
+                    ),
+                    messages=[{"role": "user", "content": prompt}],
                 )
-                text = response.text
-                logger.info("Received Gemini response")
+                text = "".join(b.text for b in response.content if b.type == "text")
+                logger.info("Received Claude response")
             except Exception as e:
-                logger.error(f"Gemini API error: {str(e)}")
+                logger.error(f"Claude API error: {str(e)}")
                 logger.info("Skipping this segment due to API error")
                 return {
                     'start_time': segment['start_time'],
@@ -322,9 +343,9 @@ Ensure the "text" field matches words exactly as they appear in the original tex
                         raise
                 else:
                     logger.error("No valid JSON found in response")
-                    raise ValueError("No valid JSON in Gemini response")
+                    raise ValueError("No valid JSON in Claude response")
             except Exception as e:
-                logger.error(f"Error processing Gemini response: {str(e)}")
+                logger.error(f"Error processing Claude response: {str(e)}")
                 logger.info("Skipping this segment due to processing error")
                 return {
                     'start_time': segment['start_time'],

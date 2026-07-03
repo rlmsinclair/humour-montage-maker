@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Udder — Funny Moments Montage Maker</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #1e2a4a 0%, #0d1117 60%); color: #e6edf3;
+    display: flex; justify-content: center; padding: 32px 16px;
+  }
+  .app { width: 100%; max-width: 720px; }
+  h1 { font-size: 1.7rem; margin: 0 0 4px; }
+  .sub { color: #9aa7b4; margin: 0 0 28px; font-size: .95rem; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 22px; margin-bottom: 18px; }
+  .drop {
+    border: 2px dashed #3a4553; border-radius: 12px; padding: 34px 16px; text-align: center;
+    cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: #58a6ff; background: #1b2230; }
+  .drop input { display: none; }
+  .drop .big { font-size: 2rem; margin-bottom: 8px; }
+  .fname { margin-top: 12px; color: #58a6ff; font-size: .9rem; word-break: break-all; }
+  button {
+    background: #238636; color: #fff; border: 0; border-radius: 9px; padding: 12px 20px;
+    font-size: 1rem; font-weight: 600; cursor: pointer; width: 100%; margin-top: 16px;
+  }
+  button:hover { background: #2ea043; }
+  button:disabled { background: #30363d; color: #8b949e; cursor: not-allowed; }
+  .status { display: flex; align-items: center; gap: 12px; font-size: .95rem; }
+  .spinner {
+    width: 20px; height: 20px; border: 3px solid #30363d; border-top-color: #58a6ff;
+    border-radius: 50%; animation: spin .8s linear infinite; flex: 0 0 auto;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .steps { list-style: none; padding: 0; margin: 0; }
+  .steps li { padding: 6px 0; color: #6e7681; }
+  .steps li.active { color: #e6edf3; font-weight: 600; }
+  .steps li.done { color: #3fb950; }
+  .steps li.done::before { content: "✓ "; }
+  .steps li.active::before { content: "→ "; }
+  .clip { border-left: 3px solid #d29922; padding: 8px 0 8px 14px; margin: 12px 0; }
+  .clip .t { color: #d29922; font-size: .8rem; font-family: monospace; }
+  .clip .q { font-weight: 600; margin: 3px 0; }
+  .clip .r { color: #9aa7b4; font-size: .9rem; }
+  video { width: 100%; border-radius: 10px; margin-top: 6px; background: #000; }
+  a.dl { display: inline-block; margin-top: 12px; color: #58a6ff; text-decoration: none; font-weight: 600; }
+  .err { color: #f85149; }
+  .hidden { display: none; }
+  .muted { color: #6e7681; font-size: .85rem; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>🐮 Udder</h1>
+  <p class="sub">Upload a video → Whisper transcribes it → Claude finds the funny bits → get a highlight montage.</p>
+
+  <div class="card">
+    <label class="drop" id="drop">
+      <div class="big">🎬</div>
+      <div>Click to choose a video (or drop it here)</div>
+      <input type="file" id="file" accept="video/*" />
+      <div class="fname" id="fname"></div>
+    </label>
+    <video id="preview" class="hidden" controls muted></video>
+    <button id="go" disabled>Find funny moments</button>
+    <div class="muted">Processing runs on your local server and may take a minute for longer videos.</div>
+  </div>
+
+  <div class="card hidden" id="progress">
+    <ul class="steps">
+      <li id="s1">Uploading &amp; transcribing (Whisper)</li>
+      <li id="s2">Analyzing humor (Claude Sonnet)</li>
+      <li id="s3">Assembling montage (ffmpeg)</li>
+    </ul>
+    <div class="status" id="statusRow"><div class="spinner"></div><span id="statusText">Working…</span></div>
+  </div>
+
+  <div class="card hidden" id="clipsCard">
+    <h3 style="margin-top:0">Funny moments found</h3>
+    <div id="clips"></div>
+  </div>
+
+  <div class="card hidden" id="resultCard">
+    <h3 style="margin-top:0">Your montage 🎉</h3>
+    <video id="result" controls></video>
+    <a class="dl" id="download" href="#" download>⬇ Download montage</a>
+  </div>
+
+  <div class="card hidden err" id="errCard"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fileInput = $("file"), drop = $("drop"), fname = $("fname"), preview = $("preview"),
+      go = $("go"), progress = $("progress"), statusText = $("statusText"),
+      clipsCard = $("clipsCard"), clipsEl = $("clips"), resultCard = $("resultCard"),
+      resultVid = $("result"), download = $("download"), errCard = $("errCard");
+let chosenFile = null, duration = 0;
+
+function fmt(s){ s = Math.max(0, Math.round(s)); const m = Math.floor(s/60), r = s%60; return `${m}:${String(r).padStart(2,"0")}`; }
+function setStep(el, cls){ ["s1","s2","s3"].forEach(id => { if(id===el) $(id).className = cls; }); }
+function stepState(active){ // active: 1,2,3 or 0=all done
+  $("s1").className = active===1 ? "active" : "done";
+  $("s2").className = active===2 ? "active" : (active>2||active===0 ? "done":"");
+  $("s3").className = active===3 ? "active" : (active===0 ? "done":"");
+}
+function showErr(msg){ progress.classList.add("hidden"); errCard.classList.remove("hidden"); errCard.textContent = "Error: " + msg; go.disabled = false; }
+
+fileInput.onchange = () => pick(fileInput.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); pick(e.dataTransfer.files[0]); };
+
+function pick(f){
+  if(!f) return;
+  chosenFile = f; fname.textContent = f.name;
+  preview.src = URL.createObjectURL(f); preview.classList.remove("hidden");
+  preview.onloadedmetadata = () => { duration = preview.duration; go.disabled = false; };
+}
+
+go.onclick = async () => {
+  if(!chosenFile) return;
+  go.disabled = true; errCard.classList.add("hidden");
+  clipsCard.classList.add("hidden"); resultCard.classList.add("hidden");
+  progress.classList.remove("hidden");
+  try {
+    // 1 + 2: transcribe + analyze
+    stepState(1); statusText.textContent = "Transcribing and analyzing… this is the slow part.";
+    const fd = new FormData();
+    fd.append("file", chosenFile);
+    fd.append("video_duration", duration || 0);
+    const pRes = await fetch("/process-video-whole", { method: "POST", body: fd });
+    if(!pRes.ok) throw new Error("processing failed (" + pRes.status + ")");
+    const { clips, file_id } = await pRes.json();
+    stepState(3);
+
+    // show clips
+    if(!clips || !clips.length){
+      progress.classList.add("hidden");
+      clipsCard.classList.remove("hidden");
+      clipsEl.innerHTML = "<p>No funny moments detected 😐 Try a different video.</p>";
+      go.disabled = false;
+      return;
+    }
+    clipsEl.innerHTML = clips.map(c =>
+      `<div class="clip"><div class="t">${fmt(c.start_time)} – ${fmt(c.end_time)}</div>
+       <div class="q">“${(c.text||"").replace(/</g,"&lt;")}”</div>
+       <div class="r">${(c.reason||"").replace(/</g,"&lt;")}</div></div>`).join("");
+    clipsCard.classList.remove("hidden");
+
+    // 3: assemble montage
+    statusText.textContent = "Cutting and stitching the montage…";
+    const mfd = new FormData();
+    mfd.append("segments", JSON.stringify(clips));
+    mfd.append("file_id", file_id);
+    const mRes = await fetch("/create-montage", { method: "POST", body: mfd });
+    if(!mRes.ok) throw new Error("montage failed (" + mRes.status + ")");
+    const { file_id: montageId } = await mRes.json();
+
+    // done
+    stepState(0); progress.classList.add("hidden");
+    const url = "/download-montage/" + montageId;
+    resultVid.src = url;
+    download.href = url + "?download=true";
+    download.setAttribute("download", "funny_montage.mp4");
+    resultCard.classList.remove("hidden");
+    go.disabled = false;
+  } catch(e){ showErr(e.message); }
+};
+</script>
+</body>
+</html>
